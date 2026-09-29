@@ -1,0 +1,399 @@
+# QueryLens — AI-Powered Marketplace Analytics Copilot
+# metadata/schema_dictionary.yaml
+#
+# Purpose: injected into the LLM's system prompt as schema/metadata context for SQL
+# generation. Describes the queryable warehouse layer only.
+#
+# Sources (Marketplace Analytics Platform repository): docs/04_schema_design.md (warehouse
+# DDL/structure), docs/02_data_dictionary.md (source-data quirks that persist into the
+# warehouse), docs/05_etl_methodology.md (exact cleaning rules applied),
+# docs/03_data_assessment_and_quality_report.md (row counts, severity of known issues),
+# docs/09_ml_outputs_reference.md (ml_* tables, logic and validated output); plus live checks
+# of the warehouse as the read-only role (scripts/inspect_warehouse_schema.py).
+
+warehouse:
+  schema: warehouse
+  design_summary: >
+    Star schema, multi-fact design in PostgreSQL. fact_order_items is the primary
+    fact table at line-item grain. fact_payments and fact_reviews are separate fact
+    tables at order grain, kept apart from fact_order_items specifically to avoid
+    fan-out — joining their multi-row-per-order records directly onto multi-row
+    order items would multiply row counts and silently inflate revenue and review
+    metrics. All three fact tables connect to each other via order_id, which is
+    carried as a degenerate dimension (a plain string column, not a surrogate-key
+    join) on fact_order_items, fact_payments, and fact_reviews alike. Order-level
+    attributes (status, all lifecycle timestamps) live in dim_order rather than
+    being denormalized onto fact_order_items.
+  sql_generation_rules:
+    - "Prefer the 13 vw_* views (see views_reference.yaml) over querying these tables directly. Only fall back to raw dim_*/fact_* joins when no view covers the question."
+    - "Never reference a `staging` schema or any stg_* table — it does not exist from this role's perspective and any generated SQL referencing it will fail permission checks."
+    - "To join fact_payments or fact_reviews to fact_order_items (or to each other), join on order_id directly. Do not route through dim_order for this — dim_order does not have a 1:1 relationship guaranteed with every order_id in fact_payments/fact_reviews (e.g. reviews exist for orders with no dim_order-eligible status), and multi-row fan-out across facts is exactly what the split-table design avoids."
+    - "For any order-level metric (revenue, delivery days, review score) computed from fact_order_items, collapse/aggregate to order grain BEFORE joining to fact_payments or fact_reviews, or before further grouping — fact_order_items is at line-item grain, so a naive join against order-grain facts multiplies rows for multi-item orders."
+    - "customer_id is order-scoped (one per order, even for repeat customers). Use customer_unique_id, not customer_id, for any customer-level aggregation (RFM, CLV, retention, counting distinct customers)."
+    - "review_id is not guaranteed unique across rows in fact_reviews — 814 review_ids are attached to more than one order_id due to Olist's split-seller checkout behavior. Use COUNT(DISTINCT review_id) whenever counting reviews, never COUNT(*) or COUNT(review_id)."
+    - "Most business metrics (revenue, delivery performance) should filter to delivered orders only, i.e. dim_order.order_status = 'delivered', unless the question is specifically about order status/funnel/cancellations."
+    - "geolocation_key on dim_customer and dim_seller can be NULL (not every zip prefix has a geolocation match). Any query producing map/geographic output should filter geolocation_key IS NOT NULL; non-geographic queries should not filter on it."
+    - "Categorical values are case- and spelling-sensitive: copy them exactly as they appear in the data (e.g. order_status 'delivered', payment_type 'credit_card'). A value written in the wrong case silently returns zero rows."
+    - "When aggregating revenue by product category, COALESCE(product_category_name_english, 'uncategorised') — 610 products have a NULL category, and this is the convention used consistently across the existing SQL views."
+    - "order_delivered_customer_date is the correct column for delivery-time calculations (purchase timestamp to this column). Do not use order_delivered_carrier_date as a delivery-time midpoint or proxy — its timestamp sequencing is unreliable relative to order_approved_at in a small number of rows."
+
+tables:
+
+  dim_date:
+    kind: dimension
+    purpose: "Calendar dimension used for all time-based analysis and filtering. Generated programmatically, not loaded from a source CSV."
+    grain: "One row per calendar date."
+    row_count: 1461
+    date_range: "2016-01-01 to 2019-12-31 (covers the full 2016-09 to 2018-10 dataset period plus buffer for forward-looking estimated delivery dates)."
+    primary_key: date_key
+    unique_keys: ["full_date"]
+    foreign_keys: []
+    columns:
+      - {name: date_key, type: INTEGER, description: "Surrogate PK in YYYYMMDD format, e.g. 20170315. Join target from dim_order.purchase_date_key."}
+      - {name: full_date, type: DATE, description: "Calendar date."}
+      - {name: day, type: SMALLINT, description: "Day of month, 1-31."}
+      - {name: month, type: SMALLINT, description: "Month number, 1-12."}
+      - {name: month_name, type: VARCHAR, description: "Month name, e.g. March."}
+      - {name: quarter, type: SMALLINT, description: "Calendar quarter, 1-4."}
+      - {name: year, type: SMALLINT, description: "Four-digit year."}
+      - {name: week_of_year, type: SMALLINT, description: "ISO week number, 1-53."}
+      - {name: weekday_name, type: VARCHAR, description: "Day name, e.g. Wednesday."}
+      - {name: is_weekend, type: BOOLEAN, description: "True for Saturday and Sunday."}
+
+  dim_customer:
+    kind: dimension
+    purpose: "Customer identity and location. Carries both the order-scoped customer_id (join key to dim_order) and the true person-level customer_unique_id (used for all customer-level analytics)."
+    grain: "One row per customer_id (order-scoped, not per person — see quirk)."
+    row_count: 99441
+    primary_key: customer_key
+    unique_keys: ["customer_id"]
+    foreign_keys:
+      - {column: geolocation_key, references: "dim_geolocation.geolocation_key"}
+    quirks:
+      - "customer_id is generated fresh per order by Olist, even for a returning customer — it is effectively 1:1 with orders (99,441 unique values across 99,441 rows), not with people."
+      - "customer_unique_id has 96,096 distinct values vs 99,441 rows — the ~3,345 difference is real repeat customers appearing multiple times with different customer_ids. Always use customer_unique_id for RFM, CLV, retention, or any 'how many customers' question."
+      - "geolocation_key can be NULL — not every zip prefix has a geolocation match. Filter geolocation_key IS NOT NULL only for map/geographic queries."
+    columns:
+      - {name: customer_key, type: SERIAL, description: "Surrogate PK."}
+      - {name: customer_id, type: VARCHAR, description: "Order-scoped natural key. Join key to dim_order, not a stable person identifier."}
+      - {name: customer_unique_id, type: VARCHAR, description: "True person-level identifier. Use for all customer-level analysis."}
+      - {name: customer_zip_code_prefix, type: VARCHAR, description: "5-digit zip code prefix, stored as VARCHAR (not INTEGER) to preserve leading zeros. Join key to dim_geolocation via geolocation_key."}
+      - {name: customer_city, type: VARCHAR, description: "Customer city, free text, minor spelling variation possible."}
+      - {name: customer_state, type: CHAR(2), description: "Brazilian state abbreviation, e.g. SP, RJ. 27 distinct values (26 states + Federal District)."}
+      - {name: geolocation_key, type: INTEGER, description: "FK to dim_geolocation, resolved at ETL time via zip prefix lookup. NULL where no geolocation match exists for the prefix."}
+
+  dim_seller:
+    kind: dimension
+    purpose: "Seller identity and location."
+    grain: "One row per seller_id."
+    row_count: 3095
+    primary_key: seller_key
+    unique_keys: ["seller_id"]
+    foreign_keys:
+      - {column: geolocation_key, references: "dim_geolocation.geolocation_key"}
+    quirks:
+      - "Sellers are present in 23 of Brazil's 27 states. Sao Paulo (SP) accounts for the largest share: 1,849 of 3,095 sellers (60%)."
+      - "geolocation_key can be NULL — same as dim_customer."
+    columns:
+      - {name: seller_key, type: SERIAL, description: "Surrogate PK."}
+      - {name: seller_id, type: VARCHAR, description: "Natural key, anonymized seller identifier. Referenced from fact_order_items."}
+      - {name: seller_zip_code_prefix, type: VARCHAR, description: "5-digit zip code prefix."}
+      - {name: seller_city, type: VARCHAR, description: "Seller city, free text."}
+      - {name: seller_state, type: CHAR(2), description: "Brazilian state abbreviation."}
+      - {name: geolocation_key, type: INTEGER, description: "FK to dim_geolocation. NULL where no match exists."}
+
+  dim_product:
+    kind: dimension
+    purpose: "Product catalogue with English category names resolved at ETL time."
+    grain: "One row per product_id."
+    row_count: 32951
+    primary_key: product_key
+    unique_keys: ["product_id"]
+    foreign_keys: []
+    quirks:
+      - "English category names keep the typos from the source translation file (seen in the data: fashio_female_clothing, costruction_tools_garden, costruction_tools_tools). Never 'correct' a spelling — look categories up with ILIKE on product_category_name_english instead of guessing the name."
+      - "product_category_name and product_category_name_english are both NULL for 610 products (~1.9%) where the source category was blank — not a translation failure, the category is genuinely absent. No imputation applied. Use COALESCE(product_category_name_english, 'uncategorised') when grouping."
+      - "Two Portuguese category names had no entry in the translation lookup and are hardcoded at ETL time: pc_gamer -> gaming_pc, and portateis_cozinha_e_preparadores_de_alimentos -> portable_kitchen_food_preparators (affects 13 products total)."
+      - "product_weight_g: 4 rows that were 0 in the source (physically impossible) are set to NULL at ETL time, not imputed."
+      - "product_name_length and product_description_length: the source CSV columns had a typo (lenght) — corrected to length in staging and warehouse. Do not use the misspelled name."
+    columns:
+      - {name: product_key, type: SERIAL, description: "Surrogate PK."}
+      - {name: product_id, type: VARCHAR, description: "Natural key, anonymized product identifier."}
+      - {name: product_category_name, type: VARCHAR, description: "Category in Portuguese. NULL for 610 products."}
+      - {name: product_category_name_english, type: VARCHAR, description: "English category name, joined from the translation lookup at ETL time. NULL wherever product_category_name is NULL."}
+      - {name: product_name_length, type: INTEGER, description: "Character count of the product name as listed by the seller."}
+      - {name: product_description_length, type: INTEGER, description: "Character count of the product description text."}
+      - {name: product_photos_qty, type: INTEGER, description: "Number of photos uploaded for the listing."}
+      - {name: product_weight_g, type: NUMERIC, description: "Product weight in grams. NULL where source value was 0 (data entry gap)."}
+      - {name: product_length_cm, type: NUMERIC, description: "Product length in centimetres."}
+      - {name: product_height_cm, type: NUMERIC, description: "Product height in centimetres."}
+      - {name: product_width_cm, type: NUMERIC, description: "Product width in centimetres."}
+
+  dim_geolocation:
+    kind: dimension
+    purpose: "Geographic coordinates for Brazilian postal code prefixes, deduplicated to one row per prefix. Enables lat/lng heatmap analysis."
+    grain: "One row per zip_code_prefix."
+    row_count: 19011   # one row per zip prefix, deduplicated from 1,000,163 raw geolocation rows
+    primary_key: geolocation_key
+    unique_keys: ["zip_code_prefix"]
+    foreign_keys: []
+    quirks:
+      - "The raw source file has ~19,000 unique prefixes but 1,000,163 rows (multiple geocoded points per prefix). Deduplicated at ETL time: avg_lat/avg_lng are the arithmetic mean of valid coordinates per prefix; city/state use the most-frequent (mode) value, which also smooths minor spelling variants like 'sao paulo' vs 'sao paulo'."
+      - "31 raw rows with coordinates outside Brazil's bounding box (lat outside -34 to 6, lng outside -75 to -32) were excluded before averaging, due to a geocoding name-collision bug matching Brazilian town names to same-named towns in other countries."
+      - "Column names are avg_lat/avg_lng (not lat/lng) specifically to signal these are averaged, not raw, coordinates."
+      - "Coverage is not complete — not every customer/seller zip prefix has a matching row here, which is why geolocation_key on dim_customer/dim_seller can be NULL."
+    columns:
+      - {name: geolocation_key, type: SERIAL, description: "Surrogate PK."}
+      - {name: zip_code_prefix, type: VARCHAR, description: "5-digit Brazilian postal code prefix, natural key. Join target from dim_customer.geolocation_key and dim_seller.geolocation_key."}
+      - {name: avg_lat, type: NUMERIC, description: "Average latitude across geocoded records for this prefix, out-of-bounds rows excluded."}
+      - {name: avg_lng, type: NUMERIC, description: "Average longitude across geocoded records for this prefix, out-of-bounds rows excluded."}
+      - {name: city, type: VARCHAR, description: "Most-frequent (mode) city name for this prefix."}
+      - {name: state, type: CHAR(2), description: "Brazilian state abbreviation for this prefix."}
+
+  dim_order:
+    kind: dimension
+    purpose: "Order header — status and all lifecycle timestamps. Kept as a dedicated dimension rather than denormalized onto fact_order_items to keep the fact table lean and order attributes in one authoritative location."
+    grain: "One row per order_id."
+    row_count: 99441
+    primary_key: order_key
+    unique_keys: ["order_id"]
+    foreign_keys:
+      - {column: customer_key, references: "dim_customer.customer_key"}
+      - {column: purchase_date_key, references: "dim_date.date_key"}
+    quirks:
+      - "97% of orders (96,478) have order_status = 'delivered'. The remaining 3% span shipped, canceled, unavailable, invoiced, processing, created, approved — these are real orders retained in the warehouse, but should be excluded from revenue and delivery-time metrics unless the question is specifically about status/funnel/cancellations."
+      - "order_approved_at is NULL for 160 orders (canceled/unavailable before payment confirmation)."
+      - "order_delivered_carrier_date is NULL for 1,783 orders, and in some rows precedes order_approved_at (sellers pre-shipping before payment is logged). Do not use it as a delivery-time midpoint."
+      - "order_delivered_customer_date is NULL for 2,965 undelivered orders. This is the correct, authoritative endpoint for delivery-duration calculations (paired with order_purchase_timestamp). 8 delivered orders are missing this value due to isolated carrier scan failures and silently drop from delivery-time calculations."
+      - "purchase_date_key is derived from the date portion of order_purchase_timestamp, formatted YYYYMMDD, matching dim_date.date_key directly."
+    columns:
+      - {name: order_key, type: SERIAL, description: "Surrogate PK."}
+      - {name: order_id, type: VARCHAR, description: "Natural key. Carried as a degenerate dimension on fact_order_items, fact_payments, and fact_reviews for cross-fact joins without fan-out."}
+      - {name: customer_key, type: INTEGER, description: "FK to dim_customer."}
+      - {name: purchase_date_key, type: INTEGER, description: "FK to dim_date, derived from order_purchase_timestamp's date portion."}
+      - {name: order_status, type: VARCHAR, description: "Order status at time of data export. Values: delivered, shipped, canceled, unavailable, invoiced, processing, created, approved."}
+      - {name: order_purchase_timestamp, type: TIMESTAMP, description: "Date/time customer placed the order. Always populated, the most reliable timestamp in the table."}
+      - {name: order_approved_at, type: TIMESTAMP, description: "Date/time payment was approved. NULL for 160 orders."}
+      - {name: order_delivered_carrier_date, type: TIMESTAMP, description: "Date/time seller handed the package to the carrier. NULL for 1,783 orders. Not reliable as a delivery-time midpoint (see quirks)."}
+      - {name: order_delivered_customer_date, type: TIMESTAMP, description: "Date/time customer received the package. NULL for 2,965 undelivered orders (8 delivered orders also missing this value). Correct endpoint for delivery-duration metrics."}
+      - {name: order_estimated_delivery_date, type: TIMESTAMP, description: "Estimated delivery date shown to the customer at purchase time. Always populated."}
+
+  fact_order_items:
+    kind: fact
+    purpose: "Primary fact table — one row per order line item. Contains item-level revenue and freight measures. Lowest grain in the warehouse."
+    grain: "One row per (order_id, order_item_id)."
+    row_count: 112650
+    primary_key: order_item_key
+    unique_keys: ["(order_id, order_item_id)"]
+    foreign_keys:
+      - {column: order_key, references: "dim_order.order_key"}
+      - {column: seller_key, references: "dim_seller.seller_key"}
+      - {column: product_key, references: "dim_product.product_key"}
+    quirks:
+      - "price excludes freight and is the primary revenue measure at item level. freight_value is this item's allocated share of the order's total freight, not the order-level freight total."
+      - "order_id is retained here as a degenerate dimension (in addition to the surrogate order_key FK) specifically so fact_payments and fact_reviews can join without routing through dim_order and risking fan-out."
+      - "A single order can span multiple sellers — each seller's items are tracked as separate rows via order_item_id, up to a max of 21 items on one order."
+      - "shipping_limit_date is NULL where the source value was more than 60 days past order_purchase_timestamp (4 rows from one seller had erroneous 2020 dates)."
+      - "This table is at line-item grain. Any order-level metric derived from it (avg_order_value, delivery time, review join) must be aggregated to order_id first before further grouping, or multi-item orders will be double-counted."
+    columns:
+      - {name: order_item_key, type: SERIAL, description: "Surrogate PK."}
+      - {name: order_id, type: VARCHAR, description: "Degenerate dimension. Natural join key to fact_payments and fact_reviews (join directly on this, not through dim_order)."}
+      - {name: order_item_id, type: SMALLINT, description: "Sequential item number within an order, starts at 1, max observed value 21. Unique only within a given order_id, not across the table."}
+      - {name: order_key, type: INTEGER, description: "FK to dim_order."}
+      - {name: seller_key, type: INTEGER, description: "FK to dim_seller."}
+      - {name: product_key, type: INTEGER, description: "FK to dim_product."}
+      - {name: price, type: NUMERIC, description: "Item sale price in BRL, excluding freight. Primary revenue measure."}
+      - {name: freight_value, type: NUMERIC, description: "Freight cost allocated to this item in BRL, not the order-level total."}
+      - {name: shipping_limit_date, type: TIMESTAMP, description: "Seller's handling deadline. NULL where source value exceeded order_purchase_timestamp + 60 days (erroneous outliers)."}
+
+  fact_payments:
+    kind: fact
+    purpose: "Payment records at installment-sequence grain, kept separate from fact_order_items to avoid fan-out when an order has multiple payment rows."
+    grain: "One row per (order_id, payment_sequential)."
+    row_count: 103886
+    primary_key: payment_key
+    unique_keys: ["(order_id, payment_sequential)"]
+    foreign_keys: []
+    quirks:
+      - "No surrogate FK to dim_order by design — a small number of order_ids here don't have a matching dim_order row eligible for strict FK enforcement (e.g. edge-case statuses), so joins use the order_id string directly, same as fact_order_items."
+      - "1 delivered order (BRL 143.46) has no payment record at all — an early-platform logging gap. Revenue totals from fact_payments will understate fact_order_items-based revenue by this amount for that one order."
+      - "payment_installments = 0 in 2 source rows was corrected to 1 at ETL time (zero installments is not a valid state)."
+      - "For orders with a split payment (e.g. voucher + credit card), each payment method gets its own row with an incrementing payment_sequential. Summing payment_value across all rows for one order_id gives the total amount paid for that order."
+    columns:
+      - {name: payment_key, type: SERIAL, description: "Surrogate PK."}
+      - {name: order_id, type: VARCHAR, description: "Degenerate dimension. Join key to fact_order_items and dim_order via the order_id string."}
+      - {name: payment_sequential, type: SMALLINT, description: "Payment sequence number within an order, starts at 1."}
+      - {name: payment_type, type: VARCHAR, description: "Payment method. Values: credit_card (~74% of records), boleto, voucher, debit_card, not_defined."}
+      - {name: payment_installments, type: SMALLINT, description: "Number of installments. Average across the dataset is 2.85; only credit_card supports more than 1. Source zeros corrected to 1."}
+      - {name: payment_value, type: NUMERIC, description: "Total value of this payment record in BRL (full value for installment payments, not per-installment)."}
+
+  fact_reviews:
+    kind: fact
+    purpose: "Customer review records, kept separate from fact_order_items to avoid fan-out from Olist's split-seller checkout review-attachment behavior."
+    grain: "One row per review record (in most cases, one row per order_id — see quirk)."
+    row_count: 99224
+    primary_key: review_key
+    unique_keys: []   # no unique constraint on review_id or order_id
+    foreign_keys: []
+    quirks:
+      - "review_id is NOT unique across rows: 814 review_id values are attached to more than one order_id, because Olist collects one review for an entire cart that gets split into multiple orders across sellers, then attaches the identical review to every resulting order. Always use COUNT(DISTINCT review_id) when counting reviews — plain row counts overcount by roughly 1,600."
+      - "review_score is always populated, 1 (worst) to 5 (best). Strongly skewed toward 5 stars: median 5, mean 4.09."
+      - "review_comment_title is NULL in ~88% of rows; review_comment_message is NULL in ~59% of rows — both are optional fields in Olist's post-delivery survey. Stored for potential future NLP work but not analyzed by any current view."
+      - "No surrogate FK to dim_order by design, same rationale as fact_payments — join via the order_id string."
+      - "The database enforces no unique constraint on review_id or order_id in this table (only the surrogate review_key is a key), so uniqueness of either is a data property, not a guarantee."
+    columns:
+      - {name: review_key, type: SERIAL, description: "Surrogate PK."}
+      - {name: review_id, type: VARCHAR, description: "Natural review identifier. Not unique across rows (see quirks) — do not treat as a reliable per-row unique key."}
+      - {name: order_id, type: VARCHAR, description: "Degenerate dimension. Join key to fact_order_items and dim_order via the order_id string."}
+      - {name: review_score, type: SMALLINT, description: "Star rating, 1-5. Always populated."}
+      - {name: review_comment_title, type: TEXT, description: "Optional review title, Portuguese free text. NULL in ~88% of rows."}
+      - {name: review_comment_message, type: TEXT, description: "Optional review body, Portuguese free text. NULL in ~59% of rows. Not used in any current analysis."}
+      - {name: review_creation_date, type: TIMESTAMP, description: "Date the review survey was sent to the customer."}
+      - {name: review_answer_timestamp, type: TIMESTAMP, description: "Date/time the customer submitted the review. Difference from review_creation_date is response time."}
+
+ml_tables:
+  schema: warehouse
+  table_prefix: "ml_"
+  column_confidence: "column names, types and primary keys all confirmed against the live warehouse"
+  design_summary: >
+    Four static, point-in-time tables holding outputs that require a trained model
+    (K-means or Random Forest via scikit-learn) — computation that neither plain SQL
+    nor a Tableau calculated field can perform. Distinguished from vw_* views by the
+    ml_ prefix and a computed_at timestamp on every row: a view is always current,
+    an ml_ table is a snapshot from whenever python/etl/03_materialize_ml_outputs.py was
+    last run, and can go silently stale if the warehouse is reloaded without
+    re-running that script. Refreshed via TRUNCATE + append, not drop/recreate.
+  sql_generation_rules:
+    - "Always use the cluster_name column ('Elite', 'Revenue Core', etc.), never cluster_label — cluster_label is a raw K-means integer that is not guaranteed to mean the same group across different runs of the script."
+    - "Every table carries computed_at. For any question implying 'as of now' or 'current', mention that the answer reflects the last materialization run, not a live calculation, since these are the only tables in the warehouse where that distinction matters."
+    - "ml_seller_clusters and ml_seller_outliers are both scored against the same seller population as vw_seller_performance (sellers with >= 5 orders) — join to vw_seller_performance or dim_seller on seller_id when a question needs both cluster/outlier context and other seller attributes."
+    - "ml_category_clusters is scored at the same grain as vw_product_customer_affinity. Both name the category column `category` (NOT product_category_name_english, which is the dim_product column name) — join the two on category. To reach dim_product attributes, join dim_product.product_category_name_english = ml_category_clusters.category."
+    - "Verified row counts: ml_seller_clusters 1,794 (= 3,095 sellers minus the 1,301 'Insufficient Data' sellers); ml_category_clusters 74; ml_review_score_feature_importance 5; ml_seller_outliers 9 — this last one is a threshold flag, not a full population, so its count varies run to run."
+    - "Cluster sizes and membership change whenever python/etl/03_materialize_ml_outputs.py is re-run: these tables were rebuilt after the validation run described in the docs, with different results. Never state sizes, membership or flagged sellers from memory — always query the table."
+  tables:
+
+    ml_seller_clusters:
+      kind: ml_output
+      purpose: "K-means clustering on seller quality/revenue, to check whether unsupervised structure agrees with SQL's manually-defined performance_tier from vw_seller_performance."
+      grain: "One row per scored seller (total_orders >= 5, matching vw_seller_performance's scoring population)."
+      row_count: 1794   # verified live; the Elite / Non-Elite split varies by materialization run
+      primary_key: seller_id   # confirmed via pg_constraint
+      logic: >
+        K-means on avg_review_score, on_time_rate, total_revenue (log-transformed,
+        heavily right-skewed) and cancellation_rate, StandardScaler-normalized. k
+        chosen automatically by silhouette score across k=2-8; currently finds k=2.
+        cluster_name assigned post-hoc: the cluster with the higher average
+        avg_review_score is named 'Elite', the other 'Non-Elite'.
+      known_limitations:
+        - "Naming logic assumes a binary split. If a future rerun's silhouette search selects k > 2, every cluster beyond the top-quality one collapses into 'Non-Elite', losing resolution."
+        - "cluster_label (raw integer) is not stable across reruns — always use cluster_name."
+      evaluation_reference: "From docs (earlier validated run): 71.6% of 'Strong'-tier sellers cluster with the weaker group, so the 4-way tier split does not reflect a real structural break. NOT re-confirmed: the current table splits Elite 1,525 / Non-Elite 269, versus 1,474 / 320 in that validated run. Re-derive with GROUP BY performance_tier, cluster_name before quoting."   # evaluation_reference: figures quoted from project docs, NOT re-verified; excluded from the prompt
+      columns:
+        - {name: seller_id, type: VARCHAR, description: "Natural key, matches dim_seller.seller_id / vw_seller_performance.seller_id."}
+        - {name: avg_review_score, type: NUMERIC, description: "Clustering input, carried over from vw_seller_performance."}
+        - {name: on_time_rate, type: NUMERIC, description: "Clustering input, carried over from vw_seller_performance."}
+        - {name: total_revenue, type: NUMERIC, description: "Clustering input (log-transformed only for the clustering step itself, likely stored here in raw BRL)."}
+        - {name: cancellation_rate, type: NUMERIC, description: "Clustering input, carried over from vw_seller_performance."}
+        - {name: total_orders, type: INTEGER, description: "Total orders for the seller; the scored population requires >= 5."}
+        - {name: cluster_label, type: SMALLINT, description: "Raw K-means integer label. NOT stable across reruns — do not use for analysis or filtering."}
+        - {name: cluster_name, type: VARCHAR, description: "'Elite' or 'Non-Elite'. Use this, not cluster_label, for all analysis."}
+        - {name: performance_tier, type: VARCHAR, description: "Carried over from vw_seller_performance for direct tier-vs-cluster comparison."}
+        - {name: silhouette_k, type: SMALLINT, description: "k actually selected on this run, for audit (currently 2)."}
+        - {name: computed_at, type: TIMESTAMP, description: "When this snapshot was materialized. Present on all 4 ml_ tables."}
+
+    ml_seller_outliers:
+      kind: ml_output
+      purpose: "Flags specific sellers combining above-average revenue with below-average quality, for individual account-management follow-up."
+      grain: "One row per flagged near-outlier seller. Row count NOT fixed — fluctuates with the data (9 rows when verified)."
+      row_count: 9   # verified live; varies by run
+      primary_key: seller_id   # confirmed via pg_constraint
+      logic: >
+        Z-scores computed within the same scored-seller population as
+        ml_seller_clusters, on total_revenue, avg_review_score, on_time_rate,
+        cancellation_rate. Composite quality_z = (review_z + on_time_z -
+        cancellation_z) / 3. A seller is flagged if revenue_z > 0.5 AND
+        quality_z < -0.5.
+      known_limitations:
+        - "The 0.5/0.5 threshold is a judgement call, not statistically derived — the stricter conventional 1.0/1.0 threshold returned zero sellers on this dataset."
+        - "Row count varies run to run as underlying data changes; do not assume a fixed row count in any query logic."
+      evaluation_reference: "From docs (earlier validated run): 10 outliers, BRL 312,989.25 revenue exposure, sharpest flag seller b1b3948701c5c72445495bd161b83a4c. STALE: the current table has 9 rows, so these figures need re-deriving from the table before use."   # evaluation_reference: figures quoted from project docs, NOT re-verified; excluded from the prompt
+      columns:
+        - {name: seller_id, type: VARCHAR, description: "Natural key, matches dim_seller.seller_id."}
+        - {name: seller_state, type: CHAR(2), description: "Included for quick geographic context without a join."}
+        - {name: total_orders, type: INTEGER, description: "Total orders for the seller."}
+        - {name: total_revenue, type: NUMERIC, description: "Basis for revenue_z."}
+        - {name: avg_review_score, type: NUMERIC, description: "Basis for quality_z's review component."}
+        - {name: on_time_rate, type: NUMERIC, description: "Basis for quality_z's on-time component."}
+        - {name: cancellation_rate, type: NUMERIC, description: "Basis for quality_z's cancellation component (inverted in the composite)."}
+        - {name: revenue_z, type: NUMERIC, description: "Z-score of total_revenue within the scored-seller population. Flag threshold: > 0.5."}
+        - {name: quality_z, type: NUMERIC, description: "Composite z-score: (review_z + on_time_z - cancellation_z) / 3. Flag threshold: < -0.5."}
+        - {name: computed_at, type: TIMESTAMP, description: "When this snapshot was materialized."}
+
+    ml_category_clusters:
+      kind: ml_output
+      purpose: "K-means clustering on product categories to test whether revenue-driving categories and loyalty-driving categories are the same set or different sets."
+      grain: "One row per category (matches vw_product_customer_affinity's grain)."
+      row_count: 74   # verified live; cluster sizes vary by materialization run
+      primary_key: category   # confirmed via pg_constraint
+      logic: >
+        K-means on total_revenue (log-transformed), avg_review_score,
+        freight_pct_of_revenue, category_repeat_rate_pct, StandardScaler-normalized.
+        k chosen by silhouette score across k=2-8; currently finds k=4. cluster_name
+        assigned post-hoc and sequentially: highest-revenue cluster -> 'Revenue Core';
+        of what remains, lowest review score -> 'Trouble Spot'; of what remains,
+        highest repeat rate -> 'Small & Sticky'; whatever remains -> 'Small & Well-Reviewed'.
+      known_limitations:
+        - "Naming logic is calibrated to this data's k=4 finding, not fully k-agnostic. If a future rerun selects k < 4, the naming step errors; if k > 4, extra clusters beyond the four named ones get a NULL cluster_name."
+        - "cluster_label (raw integer) is not stable across reruns — always use cluster_name."
+      evaluation_reference: "Current sizes: Small & Well-Reviewed 34, Revenue Core 33, Small & Sticky 4, Trouble Spot 3. The docs' earlier validated run had 31 / 30 / 4 / 9, so the category membership lists in docs/09_ml_outputs_reference.md are STALE — query the table for membership."   # evaluation_reference: figures quoted from project docs, NOT re-verified; excluded from the prompt
+      columns:
+        - {name: category, type: VARCHAR, description: "English category name. Natural key; matches vw_product_customer_affinity.category and dim_product.product_category_name_english."}
+        - {name: total_revenue, type: NUMERIC, description: "Clustering input (log-transformed only for the clustering step itself)."}
+        - {name: avg_review_score, type: NUMERIC, description: "Clustering input."}
+        - {name: freight_pct_of_revenue, type: NUMERIC, description: "Clustering input, carried over from vw_product_customer_affinity."}
+        - {name: category_repeat_rate_pct, type: NUMERIC, description: "Clustering input — the dimension that most separates loyalty-driving from revenue-driving clusters."}
+        - {name: cluster_label, type: SMALLINT, description: "Raw K-means integer label. NOT stable across reruns."}
+        - {name: cluster_name, type: VARCHAR, description: "'Revenue Core' / 'Trouble Spot' / 'Small & Sticky' / 'Small & Well-Reviewed'. Use this, not cluster_label."}
+        - {name: silhouette_k, type: SMALLINT, description: "k actually selected on this run, for audit (currently 4)."}
+        - {name: computed_at, type: TIMESTAMP, description: "When this snapshot was materialized."}
+
+    ml_review_score_feature_importance:
+      kind: ml_output
+      purpose: "Quantifies which single factor (delivery time, freight cost, category, state, payment type) best explains variation in review score."
+      grain: "One row per feature group. 5 rows total: delivery_days, freight_pct, category, state, payment_type. importance sums to 1.0 across all 5 rows within one computed_at run."
+      row_count: 5
+      primary_key: feature_group   # confirmed via pg_constraint
+      logic: >
+        Random Forest Regressor (200 trees, max depth 8) predicting review_score from
+        an order-level dataset: delivery days, freight %, dominant category (top 15 +
+        'other'), customer state (top 10 + 'other'), and payment type, one-hot
+        encoded. 80/20 train/test split. Feature importances are summed by original
+        feature group across one-hot dummies, so e.g. all category_* dummies roll up
+        into a single 'category' row.
+      known_limitations:
+        - "Test R-squared is modest (~0.15) — the model explains some but not most of review score variation. Delivery time's dominance is about relative importance among tested features, not that the model fits well overall."
+        - "Category and state are capped to their top 15/10 most frequent values (rest grouped as 'other'), which slightly understates the true importance of long-tail categories and states."
+      evaluation_reference: "From docs (not re-verified): delivery_days 80.85% of importance, state 7.17%, freight_pct 6.59%, category 4.24%, payment_type 1.15%; train R2 0.1834, test R2 0.1491."   # evaluation_reference: figures quoted from project docs, NOT re-verified; excluded from the prompt
+      columns:
+        - {name: feature_group, type: VARCHAR, description: "One of: delivery_days, freight_pct, category, state, payment_type."}
+        - {name: importance, type: NUMERIC, description: "Raw Random Forest feature importance, summed across one-hot dummies for this group. Sums to 1.0 across all 5 rows."}
+        - {name: importance_pct, type: NUMERIC, description: "Convenience column: importance x 100, for direct use as a chart label."}
+        - {name: train_r2, type: NUMERIC, description: "Model fit on training data. Repeated on every row (denormalized by design, harmless at 5 rows)."}
+        - {name: test_r2, type: NUMERIC, description: "Model fit on held-out test data. This is the R2 to cite when discussing overall model quality. Repeated on every row."}
+        - {name: computed_at, type: TIMESTAMP, description: "When this snapshot was materialized."}
+
+common_join_paths:
+  - name: "Revenue by customer state"
+    path: "fact_order_items -> dim_order -> dim_customer -> (customer_state)"
+  - name: "Revenue by customer location on a map"
+    path: "fact_order_items -> dim_order -> dim_customer -> dim_geolocation -> (avg_lat, avg_lng)"
+  - name: "Delivery time per order"
+    path: "fact_order_items -> dim_order -> (order_delivered_customer_date - order_purchase_timestamp), aggregate to order grain first"
+  - name: "Review score per seller"
+    path: "fact_reviews -> (order_id) -> fact_order_items -> dim_seller -> (seller_id)"
+  - name: "Revenue by product category over time"
+    path: "fact_order_items -> dim_product -> (product_category_name_english); fact_order_items -> dim_order -> dim_date -> (year, month)"
+  - name: "Customer lifetime value"
+    path: "fact_order_items -> dim_order -> dim_customer -> (customer_unique_id), GROUP BY customer_unique_id, SUM(price)"
+  - name: "Payment type mix by state"
+    path: "fact_payments -> (order_id) -> dim_order -> dim_customer -> (customer_state); fact_payments -> (payment_type, payment_value)"
