@@ -1,0 +1,530 @@
+# QueryLens — AI-Powered Marketplace Analytics Copilot
+# metadata/views_reference.yaml
+#
+# Purpose: injected into the LLM's system prompt as schema/metadata context for SQL
+# generation. Describes the 13 pre-validated analytical views — the PRIMARY query
+# surface for the AI, per the project's core design decision (check views first,
+# only fall back to raw dim_*/fact_* tables in schema_dictionary.yaml when no view
+# covers the question).
+#
+# All views live in the `warehouse` schema, prefixed vw_, and are built on top of the
+# warehouse dimension and fact tables. All views use delivered orders only unless a
+# view explicitly states otherwise. Reference date used consistently across views
+# that need one: 2018-09-01 (start of the month following the last delivered order).
+#
+# Source: docs/06_views_reference.md in the Marketplace Analytics Platform repository
+#
+# Verification (queried live as querylens_readonly): every column name and
+# type, every row_count, and every discriminator / categorical value listed below were
+# checked against the warehouse itself.
+#
+# Convention: any key named `evaluation_reference` holds figures quoted from project
+# docs. It exists only so answers can be checked during evaluation. The prompt builder
+# must STRIP these keys before injecting this file into the LLM prompt — otherwise the
+# model could quote them instead of querying, and the AI must never answer from memory.
+
+warehouse:
+  schema: warehouse
+  view_prefix: "vw_"
+  sql_generation_rules:
+    - "Always check whether one of these 13 views already answers the question before writing SQL against raw dim_*/fact_* tables. This is the project's core design decision — it reduces hallucination surface and reuses already-validated business logic."
+    - "Several views return multiple logically distinct result sets via UNION ALL, distinguished by a discriminator column (e.g. dimension, metric_type). When querying these, always filter on that discriminator column to the single result set relevant to the question — otherwise incompatible grains get mixed in the same result."
+    - "Views default to delivered orders only, unless the question is specifically about order status, cancellations, or the full order funnel — in which case use dim_order directly instead of a view."
+    - "Column names are NOT uniform across views and tables — copy them exactly from each view's `columns` list. Known traps: `category` (views and ml_* tables) vs product_category_name_english (dim_product); `state` (vw_regional_analysis) vs customer_state (dim_customer); `rfm_segment` (vw_clv) vs `segment` (vw_rfm); British 'instalment' spelling in vw_payment_behaviour vs 'installments' in fact_payments."
+    - "Discriminator and categorical values are case- and spelling-sensitive — copy them exactly: entity_type is 'Customer' / 'Seller' (capitalised), vw_delivery_experience labels use 'On-Time' and 'National', review score labels in vw_review_response_intelligence are TEXT ('1'..'5'), and instalment bands are labelled '1 (Single)', '2-3', '4-6', '7-12', '12+'. A wrong value silently returns zero rows."
+    - "For RFM segment questions use vw_rfm.segment. vw_clv.rfm_segment re-evaluates vw_rfm inside the vw_clv query, so its segment counts differ slightly; use it only for questions that stay inside vw_clv, such as CLV tier by segment."
+    - "Do not re-derive logic (RFM scores, CLV, performance tiers, health status) that a view already computes — use the view's output column directly rather than reconstructing the calculation from raw tables."
+
+views:
+
+  vw_rfm:
+    business_question: "Which customers are most valuable, and how should they be targeted?"
+    grain: "One row per customer_unique_id (true person identifier, not order-scoped customer_id)."
+    reference_date: "2018-09-01"
+    naming_note: "The monetary value column is `total_spend`; the segment column is `segment`."
+    row_count: 93358   # customers with at least one delivered order (of 96,096 unique customers)
+    known_discrepancy: "Segment counts differ slightly from vw_clv.rfm_segment (for example Loyal 26,326 here vs 26,407 in vw_clv, Champions 3,853 vs 3,800). vw_clv left-joins vw_rfm, which re-runs NTILE(5) on order_count; about 97% of customers tie at 1 order, so the ties are split arbitrarily and differently on each evaluation. Use this view for segment counts."
+    logic: >
+      Recency = days between last delivered order and the reference date. Frequency =
+      count of distinct delivered orders. Monetary = sum of order totals across all
+      delivered orders (collapsed to order level before aggregation). Each dimension
+      is scored 1-5 via NTILE(5); Recency is inverted so fewer days = higher score.
+      Segment is assigned from the R and F score combination only — M score is used
+      for ordering within segments, not for segmentation itself.
+    segment_definitions:
+      - {segment: "Champions", r_score: 5, f_score: 5}
+      - {segment: "Cannot Lose Them", r_score: 1, f_score: ">= 4"}
+      - {segment: "Loyal", r_score: "any", f_score: ">= 4"}
+      - {segment: "Recent", r_score: 5, f_score: 1}
+      - {segment: "Potential Loyal", r_score: ">= 4", f_score: "<= 2"}
+      - {segment: "Need Attention", r_score: ">= 3", f_score: ">= 3"}
+      - {segment: "Promising", r_score: ">= 3", f_score: "<= 2"}
+      - {segment: "At Risk", r_score: "<= 2", f_score: ">= 3"}
+      - {segment: "About to Sleep", r_score: "<= 2", f_score: "<= 2"}
+      - {segment: "Uncategorised", r_score: "else", f_score: "else", note: "defensive fallback; should never actually fire since the other nine conditions are exhaustive; confirmed live: no rows have this segment"}
+    known_limitations:
+      - "About 97% of customers placed one order, so NTILE(5) splits the ties on order_count arbitrarily: a one-order customer can get f_score 4 or 5 and a segment such as 'Loyal' or 'Champions'. A segment label does not by itself mean repeat purchases; order_count shows that. Segment sizes can also vary slightly between runs."
+    key_columns:
+      - {name: rfm_score, description: "Combined score string, e.g. '5-4-3' (R-F-M)."}
+      - {name: rfm_composite, description: "Simple average of R, F, M scores (max 5.0)."}
+      - {name: segment, description: "Human-readable segment label, see segment_definitions."}
+    columns:   # complete list, verified against the live schema
+      - {name: customer_unique_id, type: varchar}
+      - {name: r_score, type: int}
+      - {name: f_score, type: int}
+      - {name: m_score, type: int}
+      - {name: rfm_score, type: text}
+      - {name: rfm_composite, type: numeric}
+      - {name: segment, type: text}
+      - {name: days_since_last_order, type: int}
+      - {name: order_count, type: bigint}
+      - {name: total_spend, type: numeric}
+      - {name: avg_order_value, type: numeric}
+      - {name: first_order_date, type: date}
+      - {name: last_order_date, type: date}
+
+  vw_clv:
+    business_question: "What is each customer worth historically, and what will they likely spend in the next 12 months?"
+    grain: "One row per customer_unique_id."
+    naming_note: "The RFM segment column here is `rfm_segment` (vw_rfm calls it `segment`). r_score, f_score, m_score, order_count, avg_order_value, first/last_order_date and days_since_last_order are also exposed directly."
+    row_count: 93358
+    known_discrepancy: "rfm_segment re-evaluates vw_rfm inside this view's query, so its segment counts differ slightly from vw_rfm.segment. Use it only for questions entirely inside vw_clv; for segment counts use vw_rfm."
+    logic: >
+      historical_clv is actual total spend on all delivered orders (collapsed to order
+      level before aggregation). projected_clv_12m uses two paths: one-time buyers get
+      projected_clv_12m = avg_order_value (conservative, assumes one repeat purchase);
+      repeat buyers get projected_clv_12m = avg_order_value * MIN(annualised_purchase_rate, 12),
+      with the purchase rate capped at 12/year to prevent inflation from customers who
+      placed multiple orders in a very short window. clv_tier is NTILE(3) on
+      projected_clv_12m -> High / Mid / Low.
+    joins: "Joins to vw_rfm to bring in the RFM segment for combined customer analysis."
+    known_limitations:
+      - "Simplified projection model, not BG/NBD or Pareto/NBD — a probabilistic model would need longer purchase history than this 2-year dataset provides."
+      - "clv_tier for one-time buyers reflects AOV potential, not purchase frequency — a high-AOV one-time buyer can land in the High tier purely because their single order was large."
+      - "The purchase-rate cap of 12/year is a judgement call. Covers customers only — sellers are not in this view."
+    key_columns:
+      - {name: historical_clv, description: "Confirmed spend to date."}
+      - {name: projected_clv_12m, description: "Estimated next-12-month spend."}
+      - {name: annualised_purchase_rate, description: "Estimated orders per year, capped at 12."}
+      - {name: avg_days_between_orders, description: "NULL for one-time buyers."}
+    columns:   # complete list, verified against the live schema
+      - {name: customer_unique_id, type: varchar}
+      - {name: order_count, type: bigint}
+      - {name: historical_clv, type: numeric}
+      - {name: avg_order_value, type: numeric}
+      - {name: projected_clv_12m, type: numeric}
+      - {name: annualised_purchase_rate, type: numeric}
+      - {name: clv_tier, type: text}
+      - {name: rfm_segment, type: text}
+      - {name: r_score, type: int}
+      - {name: f_score, type: int}
+      - {name: m_score, type: int}
+      - {name: first_order_date, type: date}
+      - {name: last_order_date, type: date}
+      - {name: lifespan_days, type: int}
+      - {name: days_since_last_order, type: int}
+      - {name: avg_days_between_orders, type: numeric}
+
+  vw_retention:
+    business_question: "Of customers who first bought in a given month, how many came back in subsequent months?"
+    grain: "One row per (cohort_month, period_number). All periods up to the dataset end date are present for every cohort, including periods with zero returning customers."
+    row_count: 278
+    logic: >
+      cohort_month = month of each customer_unique_id's first delivered order.
+      period_number = months elapsed since cohort_month (0 = acquisition month). A
+      customer is retained in period N if they placed at least one delivered order N
+      months after their cohort month. retention_rate_pct = retained customers /
+      cohort_size * 100. churned_from_prev_period = retained in period N-1 minus
+      retained in period N. A complete cohort x period grid is generated so
+      zero-retention periods appear explicitly rather than being absent.
+    known_limitations:
+      - "Right-censoring: later cohorts (mid-2018) have fewer observable periods because the dataset ends August 2018 — low retention for recent cohorts is partly a data-availability artifact, not purely a business signal."
+      - "Period 0 is always 100% by definition — every customer is active in their own acquisition month."
+    key_columns:
+      - {name: cohort_month, description: "Month of first purchase (DATE, first of month)."}
+      - {name: cohort_size, description: "Total customers acquired in that month."}
+      - {name: period_number, description: "0 = acquisition month, 1 = one month later, etc."}
+      - {name: retained_customers, description: "Distinct customers who purchased in this period."}
+      - {name: retention_rate_pct, description: "Percent of cohort still active in this period."}
+    columns:   # complete list, verified against the live schema
+      - {name: cohort_month, type: date}
+      - {name: cohort_size, type: bigint}
+      - {name: period_number, type: int}
+      - {name: retained_customers, type: bigint}
+      - {name: retention_rate_pct, type: numeric}
+      - {name: churned_from_prev_period, type: bigint}
+
+  vw_seller_performance:
+    business_question: "Which sellers are performing well across revenue, reviews, and delivery, and which need intervention?"
+    grain: "One row per seller_id."
+    row_count: 3095   # 1,404 Elite, 374 Strong, 15 Average, 1 Needs Work, 1,301 Insufficient Data
+    logic: >
+      Revenue totals at item level; avg_order_value calculated at order level to avoid
+      multi-item inflation. On-time delivery calculated at order level (deduplicated).
+      Review metrics deduplicated to order grain before joining, so a multi-item order
+      contributes exactly one review score per seller. performance_score (0-100) is a
+      weighted composite: 40% avg review score (normalised 0-100), 30% on-time
+      delivery rate, 20% revenue percentile (NTILE 1-100), 10% low cancellation rate
+      (inverted: 100 - cancellation_rate). Sellers with fewer than 5 orders are
+      excluded from scoring and get performance_tier = 'Insufficient Data'.
+    performance_tiers:
+      - {tier: "Elite", threshold: ">= 80"}
+      - {tier: "Strong", threshold: ">= 60"}
+      - {tier: "Average", threshold: ">= 40"}
+      - {tier: "Needs Work", threshold: "< 40"}
+      - {tier: "Insufficient Data", threshold: "< 5 orders"}
+    known_limitations:
+      - "The 5-order minimum threshold is a judgement call — sellers with 1-4 orders can't be fairly scored but are still included for completeness."
+      - "Performance score weights are subjective (review score weighted highest, 40%, based on review score being the primary driver of platform trust)."
+    key_columns:
+      - {name: on_time_rate, description: "Percent of orders delivered on or before the estimated date (order-level, max 100%)."}
+      - {name: performance_score, description: "Weighted composite, 0-100. NULL for Insufficient Data."}
+      - {name: performance_tier, description: "Elite / Strong / Average / Needs Work / Insufficient Data."}
+    columns:   # complete list, verified against the live schema
+      - {name: seller_id, type: varchar}
+      - {name: seller_city, type: varchar}
+      - {name: seller_state, type: char}
+      - {name: total_orders, type: bigint}
+      - {name: total_items_sold, type: bigint}
+      - {name: delivered_orders, type: bigint}
+      - {name: total_revenue, type: numeric}
+      - {name: avg_order_value, type: numeric}
+      - {name: total_product_revenue, type: numeric}
+      - {name: total_freight_revenue, type: numeric}
+      - {name: avg_delivery_days, type: numeric}
+      - {name: on_time_rate, type: numeric}
+      - {name: cancellation_rate, type: numeric}
+      - {name: total_reviews, type: bigint}
+      - {name: avg_review_score, type: numeric}
+      - {name: pct_5_star, type: numeric}
+      - {name: pct_1_star, type: numeric}
+      - {name: revenue_percentile, type: numeric}
+      - {name: performance_score, type: numeric}
+      - {name: performance_tier, type: text}
+
+  vw_regional_analysis:
+    business_question: "Where is customer demand and seller supply concentrated across Brazil?"
+    grain: "One row per state (27 rows: 26 states + DF). The column is named `state` and holds the customer's state — customer_state is the dim_customer column name, not this view's."
+    logic: >
+      Demand side: revenue, orders, customers, delivery metrics grouped by
+      customer_state (where the buyer is), items collapsed to order level before
+      aggregation to prevent multi-item inflation. Reviews deduplicated to order grain
+      before joining. Supply side: seller count and revenue grouped by seller_state
+      (where the seller is), joined back onto customer state. orders_per_seller =
+      customer-state orders / seller count in that state, a proxy for market
+      underservice. Cumulative revenue share uses a window function ordered by
+      total_revenue DESC.
+    key_columns:
+      - {name: revenue_share_pct, description: "This state's share of national revenue."}
+      - {name: cumulative_revenue_pct, description: "Running total, useful for identifying the states needed to reach 80% revenue."}
+      - {name: orders_per_seller, description: "High values indicate underserved markets (demand exceeds local supply)."}
+      - {name: on_time_rate, description: "Percent of orders delivered on or before the estimated date."}
+      - {name: avg_delivery_days, description: "Average purchase-to-delivery days for delivered orders in this state."}
+    columns:   # complete list, verified against the live schema
+      - {name: state, type: char}
+      - {name: unique_customers, type: bigint}
+      - {name: total_orders, type: bigint}
+      - {name: total_revenue, type: numeric}
+      - {name: avg_order_value, type: numeric}
+      - {name: total_product_revenue, type: numeric}
+      - {name: total_freight_revenue, type: numeric}
+      - {name: revenue_share_pct, type: numeric}
+      - {name: cumulative_revenue_pct, type: numeric}
+      - {name: avg_delivery_days, type: numeric}
+      - {name: on_time_rate, type: numeric}
+      - {name: avg_review_score, type: numeric}
+      - {name: total_sellers, type: bigint}
+      - {name: seller_total_revenue, type: numeric}
+      - {name: seller_total_orders, type: bigint}
+      - {name: orders_per_seller, type: numeric}
+
+  vw_customer_health:
+    business_question: "What is the current activity status of every customer — Active, Dormant, or Lost?"
+    grain: "One row per customer_unique_id with at least one delivered order."
+    row_count: 93358   # Active 38,487 / Dormant 33,760 / Lost 21,111
+    logic: >
+      Status evaluated at the dataset end date, 2018-09-01. Active = last delivered
+      order on or after 2018-03-01 (within 6 months). Dormant = last delivered order
+      between 2017-09-01 and 2018-02-01 (6-12 months ago). Lost = last delivered order
+      before 2017-09-01 (more than 12 months ago).
+    key_columns:
+      - {name: customer_unique_id, description: "Person-level identifier."}
+      - {name: last_order_month, description: "Month of most recent delivered order."}
+      - {name: customer_status, description: "Active / Dormant / Lost."}
+    columns:   # complete list, verified against the live schema
+      - {name: customer_unique_id, type: varchar}
+      - {name: last_order_month, type: date}
+      - {name: customer_status, type: text}
+
+  vw_seller_health:
+    business_question: "How is the seller base growing month by month, and what is each seller's current activity status?"
+    grain: "Mixed — distinguished by the metric_type discriminator column. 'Monthly Trend' = one row per (order_month, seller_type New/Returning), complete zero-filled calendar grid. 'Status Snapshot' = one row per seller_id, all 3,095 registered sellers including those with zero delivered orders."
+    discriminator_column: metric_type
+    discriminator_values: ["Monthly Trend", "Status Snapshot"]
+    row_count: "3,143 (3,095 Status Snapshot + 48 Monthly Trend = 24 months x New/Returning)"
+    null_pattern: "On Status Snapshot rows seller_type is NULL; on Monthly Trend rows seller_status and seller_id are NULL. seller_type values: 'New', 'Returning'. seller_status values: 'Active' 2,156, 'Dormant' 456, 'Inactive' 358, 'Never Active' 125."
+    logic: >
+      New seller = first ever delivered order in that month. Returning seller = has at
+      least one prior delivered order before this month. Items collapsed to
+      (seller, order) grain before aggregation to correctly handle split-seller
+      orders. Status evaluated at dataset end 2018-09-01: Active (last sale on/after
+      2018-03-01), Dormant (last sale on/after 2017-09-01), Inactive (last sale before
+      2017-09-01), Never Active (no delivered orders ever). MoM growth is calculated
+      per seller type against the zero-filled grid.
+    key_columns_monthly_trend: ["order_month", "seller_type", "seller_count", "order_count", "total_revenue", "revenue_share_pct", "total_active_sellers", "mom_seller_growth_pct"]
+    key_columns_status_snapshot: ["seller_id", "seller_status", "last_sale_month"]
+    columns:   # complete list, verified against the live schema
+      - {name: metric_type, type: varchar}
+      - {name: order_month, type: date}
+      - {name: seller_type, type: text}
+      - {name: seller_id, type: varchar}
+      - {name: seller_status, type: varchar}
+      - {name: last_sale_month, type: date}
+      - {name: seller_count, type: bigint}
+      - {name: order_count, type: bigint}
+      - {name: total_revenue, type: numeric}
+      - {name: avg_order_value, type: numeric}
+      - {name: revenue_share_pct, type: numeric}
+      - {name: total_active_sellers, type: numeric}
+      - {name: total_monthly_orders, type: numeric}
+      - {name: total_monthly_revenue, type: numeric}
+      - {name: prev_month_sellers, type: bigint}
+      - {name: mom_seller_growth_pct, type: numeric}
+
+  vw_new_vs_returning_revenue:
+    business_question: "What percentage of monthly revenue comes from new vs returning customers, and is the returning share growing?"
+    grain: "One row per order_month. Complete calendar month grid including zero-activity months (e.g. November 2016)."
+    row_count: 24   # Sep 2016 - Aug 2018
+    logic: >
+      Uses the same new/returning definitions as vw_customer_health's monthly trend,
+      but pivoted wide (new and returning metrics as separate columns per row rather
+      than separate rows) to make dual-axis charting and calculated fields easier.
+      MoM growth and rolling averages are computed against the complete calendar grid
+      so gaps between active months don't produce misleading comparisons.
+    key_columns:
+      - {name: "new_revenue_pct / returning_revenue_pct", description: "Revenue mix each month."}
+      - {name: returning_revenue_mom_growth_pct, description: "Month-over-month change in returning revenue."}
+      - {name: returning_pct_3m_rolling_avg, description: "3-month rolling average of returning revenue share, smooths monthly noise."}
+      - {name: revenue_per_new_customer, description: "Revenue efficiency of customer acquisition."}
+    columns:   # complete list, verified against the live schema
+      - {name: order_month, type: date}
+      - {name: new_customers, type: bigint}
+      - {name: returning_customers, type: bigint}
+      - {name: total_customers, type: bigint}
+      - {name: new_orders, type: bigint}
+      - {name: returning_orders, type: bigint}
+      - {name: total_orders, type: bigint}
+      - {name: new_revenue, type: numeric}
+      - {name: returning_revenue, type: numeric}
+      - {name: total_revenue, type: numeric}
+      - {name: new_revenue_pct, type: numeric}
+      - {name: returning_revenue_pct, type: numeric}
+      - {name: new_avg_order_value, type: numeric}
+      - {name: returning_avg_order_value, type: numeric}
+      - {name: revenue_per_new_customer, type: numeric}
+      - {name: prev_month_returning_revenue, type: numeric}
+      - {name: returning_revenue_mom_growth_pct, type: numeric}
+      - {name: prev_month_total_revenue, type: numeric}
+      - {name: total_revenue_mom_growth_pct, type: numeric}
+      - {name: returning_pct_3m_rolling_avg, type: numeric}
+
+  vw_pareto_analysis:
+    business_question: "Does the 80/20 rule hold — do 20% of customers and sellers drive 80% of revenue?"
+    grain: "Two entity types unified via UNION ALL — one row per customer_unique_id and one row per seller_id. Filter by entity_type to analyze each separately. entity_id holds customer_unique_id or seller_id depending on entity_type (entity_type values are 'Customer' and 'Seller', capitalised)."
+    discriminator_column: entity_type
+    discriminator_values: ["Customer", "Seller"]   # capitalised, case-sensitive
+    row_count: "96,328 (93,358 Customer + 2,970 Seller)"
+    logic: >
+      Entities ranked by total revenue descending within each entity type.
+      cumulative_revenue_pct is the running revenue total from highest to lowest
+      earner. cumulative_pct_of_entities uses ROW_NUMBER (not RANK) so the x-axis
+      increments strictly even when entities tie on revenue. is_top_20_pct = TRUE if
+      the entity falls within the top 20% by count. is_within_80_pct_revenue = TRUE if
+      the entity is needed to reach 80% cumulative revenue.
+    evaluation_reference:   # evaluation_reference: figures quoted from project docs, NOT re-verified; excluded from the prompt
+      - "Customer Pareto: ~49% of customers drive 80% of revenue (flatter than 80/20, no dominant whale segment)."
+      - "Seller Pareto: ~19% of sellers drive 80% of revenue (tighter than 80/20, classic marketplace power law)."
+    columns:   # complete list, verified against the live schema
+      - {name: entity_type, type: text}
+      - {name: entity_id, type: varchar}
+      - {name: total_revenue, type: numeric}
+      - {name: total_orders, type: bigint}
+      - {name: revenue_rank, type: bigint}
+      - {name: revenue_pct_of_total, type: numeric}
+      - {name: cumulative_revenue_pct, type: numeric}
+      - {name: cumulative_pct_of_entities, type: numeric}
+      - {name: grand_total_revenue, type: numeric}
+      - {name: total_entities, type: bigint}
+      - {name: is_top_20_pct, type: boolean}
+      - {name: is_within_80_pct_revenue, type: boolean}
+
+  vw_delivery_experience:
+    business_question: "How fast are orders delivered, and how strongly does delivery performance drive review scores?"
+    grain: "Three result sets via UNION ALL, filter by dimension: 'Overall' (one national summary row), 'By State' (one row per customer state), 'On-time vs Late' (two rows comparing delivery status groups)."
+    discriminator_column: dimension
+    discriminator_values: ["Overall", "By State", "On-time vs Late"]
+    row_count: "30 (27 By State + 2 On-time vs Late + 1 Overall)"
+    dimension_value_labels:
+      "By State": "the 27 two-letter state codes, AC through TO (all 26 states + DF)"
+      "On-time vs Late": ["On-Time", "Late"]
+      "Overall": ["National"]
+    logic: >
+      Calculated at order level (deduplicated from item level to prevent multi-item
+      inflation). On-time = order_delivered_customer_date <= order_estimated_delivery_date.
+      Early = delivered 2+ days before estimate. avg_days_vs_estimate is negative when
+      delivered ahead of schedule. Delivery days = order_purchase_timestamp to
+      order_delivered_customer_date. Median uses PERCENTILE_CONT(0.5).
+    evaluation_reference:   # evaluation_reference: figures quoted from project docs, NOT re-verified; excluded from the prompt
+      - "National average delivery: 12.1 days, median 10 days."
+      - "On-time deliveries average a 4.29 review vs 2.57 for late deliveries — a 1.72 point gap."
+      - "88.77% of orders are delivered early — Olist systematically under-promises on estimated delivery dates."
+    columns:   # complete list, verified against the live schema
+      - {name: dimension, type: text}
+      - {name: dimension_value, type: text}
+      - {name: total_orders, type: bigint}
+      - {name: avg_delivery_days, type: numeric}
+      - {name: min_delivery_days, type: numeric}
+      - {name: max_delivery_days, type: numeric}
+      - {name: median_delivery_days, type: numeric}
+      - {name: on_time_rate, type: numeric}
+      - {name: early_delivery_rate, type: numeric}
+      - {name: late_delivery_rate, type: numeric}
+      - {name: avg_days_vs_estimate, type: numeric}
+      - {name: avg_review_score, type: numeric}
+      - {name: avg_review_on_time, type: numeric}
+      - {name: avg_review_late, type: numeric}
+
+  vw_product_customer_affinity:
+    business_question: "Which product categories drive the most revenue, and which have satisfaction problems?"
+    grain: "One row per category (74 categories including 'uncategorised'). The column is named `category` and holds the English category name — product_category_name_english is the dim_product column name, not this view's."
+    logic: >
+      NULL English category names are grouped as 'uncategorised'. Revenue and volume
+      metrics are at item level; delivery days are deduplicated to (category, order)
+      grain to prevent multi-item orders over-weighting the average. Review metrics
+      are deduplicated to order grain — a multi-item order in one category
+      contributes exactly one review score; for orders spanning multiple categories,
+      the review is attributed to the category of the highest-value item.
+      category_repeat_rate_pct = customers who placed 2+ orders containing this
+      category / total unique customers in the category. top_customer_state uses a
+      DISTINCT ON pattern. Revenue tiers: High (>=5% revenue share), Mid (1-5%),
+      Long Tail (<1%).
+    key_columns:
+      - {name: freight_pct_of_revenue, description: "High values indicate heavy/bulky categories where shipping erodes value."}
+      - {name: category_repeat_rate_pct, description: "Category-level loyalty proxy."}
+      - {name: revenue_tier, description: "High Revenue / Mid Revenue / Long Tail."}
+    columns:   # complete list, verified against the live schema
+      - {name: category, type: varchar}
+      - {name: total_orders, type: bigint}
+      - {name: total_items, type: bigint}
+      - {name: unique_products, type: bigint}
+      - {name: unique_customers, type: bigint}
+      - {name: total_revenue, type: numeric}
+      - {name: avg_item_value, type: numeric}
+      - {name: total_product_revenue, type: numeric}
+      - {name: total_freight_revenue, type: numeric}
+      - {name: freight_pct_of_revenue, type: numeric}
+      - {name: avg_delivery_days, type: numeric}
+      - {name: revenue_share_pct, type: numeric}
+      - {name: cumulative_revenue_pct, type: numeric}
+      - {name: avg_review_score, type: numeric}
+      - {name: total_reviews, type: bigint}
+      - {name: pct_5_star, type: numeric}
+      - {name: pct_1_star, type: numeric}
+      - {name: total_category_customers, type: bigint}
+      - {name: repeat_customers, type: bigint}
+      - {name: category_repeat_rate_pct, type: numeric}
+      - {name: top_customer_state, type: char}
+      - {name: top_state_orders, type: bigint}
+      - {name: revenue_tier, type: text}
+
+  vw_payment_behaviour:
+    business_question: "How do customers pay, and does installment usage correlate with higher order values?"
+    grain: "Three result sets via UNION ALL, filter by dimension: 'By Payment Type' (one row per payment type), 'By Instalment Band' (one row per band: '1 (Single)', '2-3', '4-6', '7-12', '12+'), 'Cross' (one row per payment_type x instalment_band, for heatmap use). dimension_value holds the payment type (By Payment Type, Cross) or the instalment band (By Instalment Band); on 'Cross' rows sub_dimension holds the instalment band, and it is NULL on the other two result sets. 'Cross' has 9 rows: only the combinations that occur."
+    naming_note: "Uses the British spelling 'instalment' in column names (avg_instalments, single_instalment_orders, multi_instalment_orders, pct_single_instalment, pct_high_instalment); fact_payments uses 'installments'. Write column names exactly."
+    discriminator_column: dimension
+    discriminator_values: ["By Payment Type", "By Instalment Band", "Cross"]
+    row_count: "19 (9 Cross + 5 By Instalment Band + 5 By Payment Type)"
+    dimension_value_labels:
+      payment_types: ["boleto", "credit_card", "debit_card", "not_defined", "voucher"]
+      instalment_bands: ["1 (Single)", "2-3", "4-6", "7-12", "12+"]
+    logic: >
+      Item totals are pre-aggregated to order level before joining payments to
+      prevent fan-out from multi-item orders. For orders with multiple payment
+      methods, the lowest available sequential payment is used as the primary type to
+      avoid double-counting. Revenue metrics use delivered orders only; payment type
+      distribution uses all orders (payment intent is valid regardless of delivery
+      outcome). Boleto, voucher, and debit_card are always single-installment by
+      definition — only credit_card supports multiple installments.
+    evaluation_reference:   # evaluation_reference: figures quoted from project docs, NOT re-verified; excluded from the prompt
+      - "Credit card: 76.93% of orders, avg 3.51 installments, only 33% single-installment."
+      - "Higher installment bands consistently show higher average order values (1 installment: BRL 129 -> 7-12 installments: BRL 343)."
+    columns:   # complete list, verified against the live schema
+      - {name: dimension, type: text}
+      - {name: dimension_value, type: varchar}
+      - {name: sub_dimension, type: text}
+      - {name: order_count, type: bigint}
+      - {name: total_payment_value, type: numeric}   # NOTE: despite the name this is SUM(price + freight_value) of the order's items (delivered orders only), not fact_payments.payment_value
+      - {name: avg_payment_value, type: numeric}
+      - {name: avg_order_item_total, type: numeric}
+      - {name: avg_instalments, type: numeric}
+      - {name: single_instalment_orders, type: bigint}
+      - {name: multi_instalment_orders, type: bigint}
+      - {name: pct_single_instalment, type: numeric}
+      - {name: pct_high_instalment, type: numeric}
+      - {name: pct_of_orders, type: numeric}
+      - {name: pct_of_revenue, type: numeric}
+
+  vw_review_response_intelligence:
+    business_question: "What does the review score profile look like, and how long do customers take to answer the review survey, by score?"
+    semantics_note: "avg_response_hours is the CUSTOMER's response time: hours between the survey being sent (review_creation_date) and the customer submitting it (review_answer_timestamp). It is NOT how quickly Olist or a seller replies to a review — the warehouse holds no seller or Olist reply timestamps. Never describe it as Olist's responsiveness."
+    grain: "Four result sets via UNION ALL, filter by dimension: 'Score Distribution' (one row per review_score 1-5), 'Response Time' (one row per review_score with avg response hours), 'By Score Band' (three rows: Positive 4-5, Neutral 3, Negative 1-2), 'By Category' (one row per product category)."
+    discriminator_column: dimension
+    discriminator_values: ["Score Distribution", "Response Time", "By Score Band", "By Category"]
+    row_count: "87 (74 By Category + 5 Response Time + 5 Score Distribution + 3 By Score Band)"
+    dimension_value_labels:
+      "By Category": "the 74 English category names exactly as stored, including source typos such as fashio_female_clothing"
+      "Response Time": ["1", "2", "3", "4", "5"]   # TEXT, not integer
+      "Score Distribution": ["1", "2", "3", "4", "5"]   # TEXT, not integer
+      "By Score Band": ["Negative (1-2)", "Neutral (3)", "Positive (4-5)"]
+    sub_dimension_note: "sub_dimension is NULL on every row of this view."
+    logic: >
+      Deduplicated to review_id grain to prevent fan-out from multi-item orders; for
+      orders spanning multiple categories, the review is attributed to the category
+      of the highest-value item. Response time = hours between review_creation_date
+      and review_answer_timestamp. Score bands: Positive >= 4, Neutral = 3,
+      Negative <= 2. Comment presence (review_comment_message not NULL) is exposed as reviews_with_comment / pct_with_comment — there is no has_comment column.
+    important_note: "review_comment_title and review_comment_message are stored in the warehouse but not analyzed by this view — NLP/sentiment analysis on review text is out of scope for this project."
+    evaluation_reference:   # evaluation_reference: figures quoted from project docs, NOT re-verified; excluded from the prompt
+      - "Bimodal score distribution: 57.83% five-star, 11.46% one-star — strong reactions dominate."
+      - "Customers take a similar time (71-77 hours) to answer the survey whatever their score. (The source doc read this as Olist's responsiveness to negative reviews; that is a misreading — see semantics_note.)"
+      - "One-star reviews have a 76.59% comment rate vs 35.91% for five-star reviews — negative customers explain themselves far more often."
+    columns:   # complete list, verified against the live schema
+      - {name: dimension, type: text}
+      - {name: dimension_value, type: text}
+      - {name: sub_dimension, type: text}
+      - {name: review_count, type: bigint}
+      - {name: pct_of_total, type: numeric}
+      - {name: cumulative_pct, type: numeric}
+      - {name: avg_response_hours, type: numeric}
+      - {name: reviews_with_comment, type: bigint}
+      - {name: pct_with_comment, type: numeric}
+      - {name: reviews_with_response, type: bigint}
+      - {name: pct_with_response, type: numeric}
+      - {name: avg_review_score, type: numeric}
+      - {name: pct_5_star, type: numeric}
+      - {name: pct_1_star, type: numeric}
+
+view_index_summary:
+  - {view: vw_rfm, question: "Who are the most valuable customers?", grain: "one row per customer_unique_id"}
+  - {view: vw_clv, question: "What is each customer worth historically and projected?", grain: "one row per customer_unique_id"}
+  - {view: vw_retention, question: "How many customers come back each month?", grain: "one row per cohort_month x period_number"}
+  - {view: vw_seller_performance, question: "Which sellers are performing well or poorly?", grain: "one row per seller_id"}
+  - {view: vw_regional_analysis, question: "Where is revenue and demand concentrated?", grain: "one row per state"}
+  - {view: vw_customer_health, question: "What is each customer's current activity status?", grain: "one row per customer_unique_id"}
+  - {view: vw_seller_health, question: "How is the seller base growing and what is each seller's status?", grain: "mixed, see metric_type"}
+  - {view: vw_new_vs_returning_revenue, question: "What share of revenue comes from new vs returning customers?", grain: "one row per order_month"}
+  - {view: vw_pareto_analysis, question: "Do 20% of customers/sellers drive 80% of revenue?", grain: "one row per entity_id (customer or seller)"}
+  - {view: vw_delivery_experience, question: "How does delivery speed affect customer satisfaction?", grain: "three grains via UNION ALL, see dimension"}
+  - {view: vw_product_customer_affinity, question: "Which categories drive the most revenue and satisfaction?", grain: "one row per category"}
+  - {view: vw_payment_behaviour, question: "How do customers pay and does payment method affect order value?", grain: "three grains via UNION ALL, see dimension"}
+  - {view: vw_review_response_intelligence, question: "What does the review score profile look like and how long do customers take to answer the survey?", grain: "four grains via UNION ALL, see dimension"}
