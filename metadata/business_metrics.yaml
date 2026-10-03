@@ -1,0 +1,329 @@
+# QueryLens — AI-Powered Marketplace Analytics Copilot
+# metadata/business_metrics.yaml
+#
+# Purpose: canonical business definitions, injected into the LLM prompt alongside
+# schema_dictionary.yaml and views_reference.yaml.
+#
+# Sources (Marketplace Analytics Platform repository): docs/06_views_reference.md, docs/02_data_dictionary.md, docs/05_etl_methodology.md,
+# docs/03_data_assessment_and_quality_report.md, and the live-warehouse checks recorded
+# in the other two metadata files.
+#
+
+conventions:
+  currency: "BRL (Brazilian real). State the currency whenever money is reported."
+  data_period: "Orders span Sep 2016 to Oct 2018. The delivered-order views cover 24 months, Sep 2016 to Aug 2018. Activity in late 2016 is very thin (e.g. November 2016 has none), so flag any trend that starts there."
+  reference_date: "2018-09-01. This is 'today' for every time-relative question."
+  relative_time: "'Last month', 'this year', 'recently' and 'last 6 months' are measured back from the reference date 2018-09-01 — never from CURRENT_DATE or NOW(). 'Last month' = Aug 2018; 'this year' = 2018 (Jan to Aug); 'last 6 months' = Mar to Aug 2018."
+  default_order_scope: "Delivered orders only (dim_order.order_status = 'delivered') for revenue, orders, customers, delivery and seller metrics. Exceptions: order-status, funnel and cancellation questions use all statuses; payment-type mix uses all orders."
+  customer_identity: "A customer is a customer_unique_id, never a customer_id (customer_id is one per order)."
+  time_axis: "An order belongs to the month of its purchase (order_purchase_timestamp; dim_order.purchase_date_key joins to dim_date), not its delivery month."
+  percent_scale: "Columns ending _pct, and rate columns such as on_time_rate and cancellation_rate, are on a 0-100 scale (88.77 means 88.77%), not 0-1. Do not multiply by 100 again."
+  rounding: "Aggregate unrounded values, then round for display: money to 2 decimals, percentages to 1-2 decimals."
+  ambiguity_policy: "If a term maps to more than one metric below, use the stated default, name the choice in the explanation, and mention the alternative in one line. Do not ask a clarifying question for something that has a default."
+  min_volume_for_rankings: "When ranking or filtering sellers by an average or a rate (avg_review_score, on_time_rate, cancellation_rate, performance_score), require total_orders >= 5, matching the scoring population of vw_seller_performance, and say so. Results based on fewer than about 30 orders or reviews are still flagged as small samples."
+
+metrics:
+
+  # ------------------------------------------------------------------ money
+  revenue:
+    aliases: [sales, total sales, GMV, turnover, income, how much did we sell]
+    definition: "Value of items sold on delivered orders: item price plus freight charged (price + freight_value)."
+    source_columns: [vw_regional_analysis.total_revenue, vw_seller_performance.total_revenue, vw_product_customer_affinity.total_revenue, vw_new_vs_returning_revenue.total_revenue, vw_pareto_analysis.total_revenue, vw_seller_health.total_revenue]
+    sql: "SUM(fact_order_items.price + fact_order_items.freight_value), joined to dim_order on order_key, WHERE dim_order.order_status = 'delivered'"
+    notes:
+      - "If the user says 'excluding shipping', 'product sales' or 'merchandise', use product_revenue instead."
+      - "Confirmed from the view SQL: every revenue column is SUM(price + freight_value), and total_revenue = total_product_revenue + total_freight_revenue. A bare 'revenue' therefore includes freight."
+
+  product_revenue:
+    aliases: [product sales, merchandise sales, revenue excluding shipping, item revenue]
+    definition: "Item prices only, excluding freight. fact_order_items.price is the primary revenue measure at item level."
+    source_columns: [vw_regional_analysis.total_product_revenue, vw_seller_performance.total_product_revenue, vw_product_customer_affinity.total_product_revenue]
+    sql: "SUM(fact_order_items.price), delivered orders only"
+
+  freight_revenue:
+    aliases: [freight, shipping revenue, shipping cost charged, delivery fees]
+    definition: "Freight charged to customers. freight_value is each item's allocated share of the order's freight, not the order-level total."
+    source_columns: [vw_regional_analysis.total_freight_revenue, vw_seller_performance.total_freight_revenue, vw_product_customer_affinity.total_freight_revenue, vw_product_customer_affinity.freight_pct_of_revenue]
+    sql: "SUM(fact_order_items.freight_value), delivered orders only"
+    notes:
+      - "freight_pct_of_revenue is freight as a share of category revenue; high values mean heavy or bulky categories where shipping erodes value."
+
+  avg_order_value:
+    aliases: [AOV, average order value, average basket, average ticket, order size]
+    definition: "Revenue per delivered order. Collapse items to order level first, then average; never average over item rows."
+    source_columns: [vw_rfm.avg_order_value, vw_clv.avg_order_value, vw_seller_performance.avg_order_value, vw_regional_analysis.avg_order_value, vw_seller_health.avg_order_value]
+    sql: "SUM(fact_order_items.price + fact_order_items.freight_value) / COUNT(DISTINCT fact_order_items.order_id), delivered orders only"
+
+  payment_value:
+    aliases: [amount paid, payments received, total paid]
+    definition: "Sum of payment records. For installment payments payment_value is the full amount, not per installment. Use only for payment questions, not as a synonym for revenue."
+    source_columns: [vw_payment_behaviour.total_payment_value, vw_payment_behaviour.avg_payment_value]
+    sql: "SUM(fact_payments.payment_value)"
+    notes:
+      - "Can differ from revenue: one delivered order (BRL 143.46) has no payment record, and vouchers count as payments."
+
+  revenue_share:
+    aliases: [share of revenue, contribution, percent of total revenue]
+    definition: "An entity's revenue as a percentage of the national (or total) revenue; the cumulative version is a running total from highest to lowest earner."
+    source_columns: [vw_regional_analysis.revenue_share_pct, vw_regional_analysis.cumulative_revenue_pct, vw_product_customer_affinity.revenue_share_pct, vw_product_customer_affinity.cumulative_revenue_pct, vw_pareto_analysis.revenue_pct_of_total, vw_pareto_analysis.cumulative_revenue_pct]
+
+  revenue_concentration:
+    aliases: [80/20, pareto, concentration, how many customers make up 80% of revenue]
+    definition: "How few entities account for most revenue. is_within_80_pct_revenue marks the entities needed to reach 80% cumulative revenue; is_top_20_pct marks the top 20% by count."
+    source_columns: [vw_pareto_analysis.is_within_80_pct_revenue, vw_pareto_analysis.is_top_20_pct, vw_pareto_analysis.cumulative_pct_of_entities]
+    notes:
+      - "Filter vw_pareto_analysis by entity_type ('Customer' or 'Seller'); the two result sets must not be mixed."
+
+  # ------------------------------------------------------- orders & customers
+  orders:
+    aliases: [number of orders, order count, order volume, transactions]
+    definition: "Count of distinct order_id (delivered orders by default)."
+    source_columns: [vw_regional_analysis.total_orders, vw_seller_performance.total_orders, vw_product_customer_affinity.total_orders, vw_new_vs_returning_revenue.total_orders, vw_rfm.order_count]
+    sql: "COUNT(DISTINCT dim_order.order_id) WHERE dim_order.order_status = 'delivered'"
+    notes:
+      - "775 orders have no items (all non-fulfilled statuses), so order counts from dim_order and item counts from fact_order_items differ by design for non-delivered statuses."
+
+  items_sold:
+    aliases: [items, units sold, products sold, line items]
+    definition: "Count of order line items; each fact_order_items row is one item."
+    source_columns: [vw_seller_performance.total_items_sold, vw_product_customer_affinity.total_items]
+    sql: "COUNT(*) FROM fact_order_items, delivered orders only"
+
+  customers:
+    aliases: [unique customers, buyers, shoppers, how many customers]
+    definition: "Distinct customer_unique_id with at least one delivered order."
+    source_columns: [vw_regional_analysis.unique_customers, vw_product_customer_affinity.unique_customers, vw_new_vs_returning_revenue.total_customers]
+    sql: "COUNT(DISTINCT dim_customer.customer_unique_id), joined through dim_order, delivered orders only"
+    notes:
+      - "93,358 customers have a delivered order; dim_customer holds 96,096 distinct customer_unique_id values in total. Say which you are counting."
+
+  new_customer:
+    aliases: [new customers, first-time buyers, acquired customers]
+    definition: "A customer in the month of their first delivered order."
+    source_columns: [vw_new_vs_returning_revenue.new_customers, vw_new_vs_returning_revenue.new_revenue, vw_new_vs_returning_revenue.new_revenue_pct, vw_new_vs_returning_revenue.revenue_per_new_customer]
+
+  returning_customer:
+    aliases: [returning customers, repeat buyers this month, existing customers]
+    definition: "A customer ordering in a month after the month of their first delivered order."
+    source_columns: [vw_new_vs_returning_revenue.returning_customers, vw_new_vs_returning_revenue.returning_revenue, vw_new_vs_returning_revenue.returning_revenue_pct, vw_new_vs_returning_revenue.returning_pct_3m_rolling_avg]
+
+  repeat_customer:
+    aliases: [repeat customers, repeat buyers, repeat purchase rate, customers who came back]
+    definition: "A customer_unique_id with two or more delivered orders. Repeat purchase rate = repeat customers / all customers with a delivered order, times 100."
+    source_columns: [vw_rfm.order_count, vw_product_customer_affinity.repeat_customers, vw_product_customer_affinity.category_repeat_rate_pct]
+    sql: "COUNT(*) FILTER (WHERE vw_rfm.order_count >= 2) over all vw_rfm rows"
+    notes:
+      - "category_repeat_rate_pct is the category-level version: customers with 2+ orders containing the category / unique customers in the category."
+
+  customer_status:
+    aliases: [active customers, dormant customers, lost customers, customer activity]
+    definition: "Status at the reference date 2018-09-01 from the last delivered order: Active = on or after 2018-03-01 (within 6 months); Dormant = 2017-09-01 up to 2018-02 (6 to 12 months ago); Lost = before 2017-09-01 (over 12 months ago)."
+    source_columns: [vw_customer_health.customer_status, vw_customer_health.last_order_month]
+
+  churn:
+    aliases: [churn, churned customers, attrition, customers we lost]
+    definition: "Default meaning: customers whose customer_status is 'Lost' (no delivered order since before 2017-09-01, i.e. over 12 months before the reference date). Churn RATE = Lost customers divided by all customers in vw_customer_health, times 100. For cohort questions ('how many customers dropped off after month N'), use churned_from_prev_period in vw_retention."
+    source_columns: [vw_customer_health.customer_status, vw_retention.churned_from_prev_period]
+    notes:
+      - "Always add one line to a churn-rate answer: most customers in this marketplace buy only once, so a high churn rate is normal here and does not signal a problem by itself."
+      - "If the user means 'stopped buying recently', mention that Dormant customers (6 to 12 months silent) are not counted as churned."
+
+  retention_rate:
+    aliases: [retention, cohort retention, how many customers come back]
+    definition: "Percent of a first-purchase cohort that placed at least one delivered order N months after their cohort month. Period 0 is always 100%."
+    source_columns: [vw_retention.retention_rate_pct, vw_retention.retained_customers, vw_retention.cohort_size, vw_retention.period_number]
+    notes:
+      - "Later cohorts have fewer observable periods because the data ends Aug 2018; low retention for recent cohorts is partly an availability artefact."
+
+  customer_lifetime_value:
+    aliases: [CLV, LTV, customer value, lifetime value]
+    definition: "historical_clv is actual spend on delivered orders. projected_clv_12m is a simple 12-month estimate: one-time buyers use avg_order_value; repeat buyers use avg_order_value times the annualised purchase rate, capped at 12 per year. clv_tier is High / Mid / Low (thirds of projected_clv_12m)."
+    source_columns: [vw_clv.historical_clv, vw_clv.projected_clv_12m, vw_clv.clv_tier, vw_clv.annualised_purchase_rate]
+    notes:
+      - "Not a probabilistic model; for one-time buyers the tier reflects order size, not purchase frequency."
+
+  rfm_segment:
+    aliases: [customer segment, RFM, champions, at risk, loyal customers]
+    definition: "Customers scored 1-5 on recency, frequency and monetary value; the segment label comes from the R and F scores only. Full segment rules are in views_reference.yaml (vw_rfm)."
+    source_columns: [vw_rfm.segment, vw_rfm.rfm_score, vw_rfm.rfm_composite, vw_rfm.total_spend]
+    notes:
+      - "Use vw_rfm.segment for segment questions. vw_clv.rfm_segment is vw_rfm re-evaluated inside the vw_clv query, and f_score ties are split arbitrarily, so its counts differ slightly."
+
+  # --------------------------------------------------------------- delivery
+  delivery_days:
+    aliases: [delivery time, delivery speed, days to deliver, shipping time, lead time]
+    definition: "Whole days from order_purchase_timestamp to order_delivered_customer_date (the views use DATE_PART('day', delivered - purchased), which drops the leftover hours, so 3 days 20 hours counts as 3), for delivered orders that have a delivery date (8 delivered orders lack one and drop out). Averages and medians are of these whole-day values, rounded to 1 decimal."
+    source_columns: [vw_delivery_experience.avg_delivery_days, vw_delivery_experience.median_delivery_days, vw_regional_analysis.avg_delivery_days, vw_seller_performance.avg_delivery_days, vw_product_customer_affinity.avg_delivery_days]
+    sql: "DATE_PART('day', dim_order.order_delivered_customer_date - dim_order.order_purchase_timestamp)"
+    notes:
+      - "Never use order_delivered_carrier_date: it is out of sequence with other timestamps on some orders."
+
+  on_time_delivery:
+    aliases: [on-time, on time delivery, late delivery, late orders, delayed, delivered late, SLA]
+    definition: "On-time = order_delivered_customer_date on or before order_estimated_delivery_date. Late = after it. There is no grace period. Early = delivered 2 or more days before the estimate (a subset of on-time)."
+    source_columns: [vw_delivery_experience.on_time_rate, vw_delivery_experience.late_delivery_rate, vw_delivery_experience.early_delivery_rate, vw_regional_analysis.on_time_rate, vw_seller_performance.on_time_rate]
+    sql: "dim_order.order_delivered_customer_date <= dim_order.order_estimated_delivery_date"
+    notes:
+      - "Calculated at order level (one value per order, not per item)."
+
+  delivery_vs_estimate:
+    aliases: [days early, days late, ahead of schedule, delivery delay]
+    definition: "Average days between actual delivery and the estimate; negative means delivered ahead of schedule."
+    source_columns: [vw_delivery_experience.avg_days_vs_estimate]
+
+  # --------------------------------------------------------------- reviews
+  review_score:
+    aliases: [rating, average rating, customer satisfaction, review stars, satisfaction]
+    definition: "Star rating 1 (worst) to 5 (best), averaged at order level so a multi-item order contributes one score. Bands: Positive = 4-5, Neutral = 3, Negative = 1-2."
+    source_columns: [vw_seller_performance.avg_review_score, vw_product_customer_affinity.avg_review_score, vw_regional_analysis.avg_review_score, vw_delivery_experience.avg_review_score, vw_review_response_intelligence.avg_review_score, vw_seller_performance.pct_5_star, vw_seller_performance.pct_1_star]
+    sql: "AVG(fact_reviews.review_score)"
+    notes:
+      - "Count reviews with COUNT(DISTINCT review_id): 814 review_ids are attached to more than one order."
+      - "'Satisfaction' maps to avg_review_score; no other satisfaction measure exists."
+
+  survey_response_time:
+    aliases: [review response time, how long customers take to review, response hours]
+    definition: "Hours between the review survey being sent (review_creation_date) and the customer submitting it (review_answer_timestamp). This is the CUSTOMER's response time, not how fast Olist or a seller replies."
+    source_columns: [vw_review_response_intelligence.avg_response_hours]
+    notes:
+      - "The warehouse holds no seller or Olist reply timestamps; questions about how fast sellers answer reviews cannot be answered."
+
+  review_comment_rate:
+    aliases: [comment rate, reviews with comments, how many leave a comment]
+    definition: "Share of reviews that include a comment message."
+    source_columns: [vw_review_response_intelligence.pct_with_comment, vw_review_response_intelligence.reviews_with_comment]
+
+  # --------------------------------------------------------------- sellers
+  seller_performance:
+    aliases: [best sellers, top-performing sellers, seller quality, worst sellers, seller score, seller tier]
+    definition: "performance_score (0-100) = 40% average review score (normalised 0-100) + 30% on-time rate + 20% revenue percentile + 10% low cancellation rate (100 minus cancellation_rate). Tiers: Elite >= 80, Strong >= 60, Average >= 40, Needs Work < 40; sellers with fewer than 5 orders are 'Insufficient Data' and unscored."
+    source_columns: [vw_seller_performance.performance_score, vw_seller_performance.performance_tier, vw_seller_performance.revenue_percentile]
+    notes:
+      - "Exclude 'Insufficient Data' sellers from any ranking by performance_score."
+      - "vw_seller_performance fills missing values with 0, not NULL: a seller with no reviews shows avg_review_score = 0, and one with no dated deliveries shows on_time_rate = 0 and avg_delivery_days = 0. Before ranking or averaging these columns, also require total_reviews > 0 (review score) or delivered_orders > 0 (delivery columns), or the zeros will pose as real scores."
+      - "total_orders in this view counts all statuses; the 5-order cut-off for scoring uses it."
+
+  cancellation_rate:
+    aliases: [cancellation rate, cancelled orders, seller cancellations]
+    definition: "Distinct orders with order_status = 'canceled' (American spelling, one l) divided by all of the seller's distinct orders in any status, times 100. Statuses such as 'unavailable' are not counted as cancelled. Sellers with no orders show 0."
+    source_columns: [vw_seller_performance.cancellation_rate]
+
+  seller_status:
+    aliases: [active sellers, dormant sellers, inactive sellers, seller activity]
+    definition: "Status at the reference date from the seller's last delivered sale: Active = on or after 2018-03-01; Dormant = on or after 2017-09-01; Inactive = before 2017-09-01; Never Active = no delivered orders ever."
+    source_columns: [vw_seller_health.seller_status, vw_seller_health.last_sale_month]
+    notes:
+      - "Filter vw_seller_health to metric_type = 'Status Snapshot'."
+
+  new_seller:
+    aliases: [new sellers, seller growth, seller acquisition, returning sellers]
+    definition: "A seller in the month of their first delivered sale; returning = a sale in a later month."
+    source_columns: [vw_seller_health.seller_type, vw_seller_health.seller_count, vw_seller_health.mom_seller_growth_pct]
+    notes:
+      - "Filter vw_seller_health to metric_type = 'Monthly Trend'."
+
+  # ----------------------------------------------- categories, regions, payments
+  category_revenue_tier:
+    aliases: [top categories, category tier, long tail categories, biggest categories]
+    definition: "High Revenue = 5% or more of revenue, Mid Revenue = 1% to 5%, Long Tail = under 1%. Products with no category are grouped as 'uncategorised'."
+    source_columns: [vw_product_customer_affinity.revenue_tier, vw_product_customer_affinity.revenue_share_pct]
+
+  region:
+    aliases: [by state, by region, regional, geographic, where]
+    definition: "Default is the CUSTOMER's state (demand side: dim_customer.customer_state; the `state` column in vw_regional_analysis). Use the seller's state (dim_seller.seller_state) only when the question is about sellers or supply."
+    source_columns: [vw_regional_analysis.state, vw_regional_analysis.total_sellers, vw_regional_analysis.orders_per_seller]
+    notes:
+      - "orders_per_seller is a proxy for underserved markets: high values mean demand exceeds local seller supply."
+
+  payment_method_mix:
+    aliases: [payment methods, how do customers pay, credit card share, boleto share, payment type]
+    definition: "Distribution of orders and payment value across payment types (credit_card, boleto, voucher, debit_card, not_defined). Uses all orders, not only delivered ones."
+    source_columns: [vw_payment_behaviour.pct_of_orders, vw_payment_behaviour.pct_of_revenue, vw_payment_behaviour.order_count]
+
+  installments:
+    aliases: [instalments, installments, payment plan, parcelamento, split payments]
+    definition: "Number of installments on a payment; only credit_card payments can exceed 1. NOTE the view columns use the British spelling 'instalment'."
+    source_columns: [vw_payment_behaviour.avg_instalments, vw_payment_behaviour.pct_single_instalment, vw_payment_behaviour.single_instalment_orders, vw_payment_behaviour.multi_instalment_orders]
+
+  freight_burden:
+    aliases: [shipping cost share, freight as percent of revenue, expensive to ship]
+    definition: "Freight as a percentage of revenue for a category."
+    source_columns: [vw_product_customer_affinity.freight_pct_of_revenue]
+
+consistency_rules:
+  # Imperative rules for the model. They exist because some numbers in this warehouse can be
+  # produced by more than one view, and the views do not always agree. The SQL logic is fixed;
+  # the model's job is to pick one source and say which.
+
+  one_source_per_answer:
+    - "Answer each question from ONE view, chosen from `canonical_source` below. Do not UNION, JOIN or compare the same measure from two different views in one answer."
+    - "Never try to reconcile two views' figures, and never average or 'correct' them. If the user's question genuinely needs two views, use each for a different measure and label which number came from which view."
+    - "If the user says a number differs from one they saw elsewhere (dashboard, another answer), do not guess a reason. Say which view and filter produced this number and that other views can compute the same idea slightly differently."
+
+  canonical_source:
+    # Where a measure exists in several views, always use this one. The right-hand text is the reason.
+    rfm_segment_counts_and_membership: "vw_rfm.segment. vw_clv.rfm_segment re-evaluates vw_rfm and its counts differ slightly; use it only for questions that are entirely inside vw_clv (for example CLV tier by segment)."
+    customer_counts_by_state: "vw_regional_analysis.unique_customers (delivered orders, by customer state)."
+    customer_status_counts: "vw_customer_health.customer_status. Do not derive Active/Dormant/Lost from vw_rfm."
+    monthly_revenue_and_orders: "vw_new_vs_returning_revenue (one row per month, zero-filled). Do not rebuild monthly totals from fact tables unless the question needs a dimension the view lacks."
+    revenue_by_category: "vw_product_customer_affinity.total_revenue."
+    revenue_by_customer_state: "vw_regional_analysis.total_revenue (customer, i.e. demand-side, state). For revenue by SELLER state use vw_regional_analysis.seller_total_revenue and say it is supply-side."
+    seller_revenue_and_scores: "vw_seller_performance."
+    delivery_rates_overall_or_by_state: "vw_delivery_experience (dimension = 'Overall' or 'By State')."
+    review_distribution: "vw_review_response_intelligence (dimension = 'Score Distribution')."
+    average_review_score_by_seller_state_or_category: "The view for that grain: vw_seller_performance (seller), vw_regional_analysis (state), vw_product_customer_affinity (category)."
+    payment_mix: "vw_payment_behaviour (dimension = 'By Payment Type')."
+
+  segment_counts_are_not_exact:
+    - "RFM segment sizes vary slightly between runs, because NTILE splits tied customers arbitrarily. Report counts as returned and add one line: 'Segment sizes can vary slightly between runs.'"
+    - "Do not draw conclusions from small differences between segments (for example a gap of under about 2%)."
+    - "Prefer shares and rankings of segments over exact counts."
+    - "Never compare vw_rfm counts with vw_clv counts: they come from separate evaluations."
+
+  same_word_different_meaning:
+    # A column name is not proof of equal meaning across views.
+    - "total_orders: in vw_seller_performance it counts ALL order statuses; in vw_regional_analysis, vw_delivery_experience, vw_pareto_analysis and vw_product_customer_affinity it counts delivered orders only. Say which when reporting it."
+    - "Review counts: vw_review_response_intelligence counts distinct review_id; vw_seller_performance, vw_regional_analysis, vw_product_customer_affinity and vw_delivery_experience count at order level. Do not compare review counts across them."
+    - "total_payment_value in vw_payment_behaviour is the sum of item price plus freight on delivered orders, NOT the amount customers paid. Describe it as order value. For 'how much was paid' use fact_payments.payment_value, once per order, and say it differs slightly."
+    - "avg_response_hours is how long the CUSTOMER took to answer the review survey. It is never a seller or company response time."
+    - "avg_order_value is the average per ORDER (items summed to the order first), never per item. Per-item averages are avg_item_value in vw_product_customer_affinity."
+
+  missing_data_and_zero_values:
+    - "In vw_seller_performance, a 0 in avg_review_score, on_time_rate or avg_delivery_days can mean 'no data', not a real zero. Before ranking, averaging or filtering on those columns, require total_reviews > 0 (for review score) or delivered_orders > 0 (for delivery columns)."
+    - "Never present a seller or category with a 0 average score as 'the worst' unless total_reviews > 0 confirms it is a real value."
+    - "NULL in a view column means not applicable (for example avg_days_between_orders for one-time buyers). Exclude NULLs from averages and say so if it changes the answer."
+    - "If a query returns zero rows, say that no matching data was found. Do not guess, estimate or substitute figures from memory."
+
+  small_samples_and_data_edges:
+    - "Rankings and comparisons built on very few orders are unreliable. Follow min_volume_for_rankings, and flag any result based on fewer than about 30 orders or reviews as a small sample."
+    - "The last cohorts and late-2018 months are incomplete (data ends Aug 2018), and late 2016 is nearly empty: flag any trend or retention figure that depends on those cohorts or months instead of presenting it as a real change."
+    - "Retention and repeat-purchase rates are low in this marketplace. Do not describe them as a data error."
+
+  deterministic_output:
+    - "Every ranking query must have a complete ORDER BY: the ranking measure first, then a unique tie-breaker (the entity id or name). Use LIMIT for 'top N'. Without a tie-breaker, equal values come back in a changing order."
+    - "Use the pre-computed columns (segment, clv_tier, performance_tier, customer_status, seller_status) instead of re-deriving them. Re-deriving can give different counts from the dashboards."
+
+  when_unsure:
+    - "If the question can be read two ways and a default exists in this file, use the default, name it in one line, and mention the alternative. Do not ask a clarifying question."
+    - "If no default exists and the readings give very different numbers, run the most common reading and say plainly which reading was used."
+    - "If the data cannot answer the question (see not_available_in_the_data), say so and name the closest thing the data can answer. Never fill the gap from general knowledge."
+    - "Every number in the explanation must come from the query result. Do not add outside facts, benchmarks or causes the data does not show; describe patterns as associations, not proven causes."
+
+ranking_defaults:
+  # What "top", "best" and "biggest" mean when the user does not say by what measure.
+  top_customers: "Highest total_spend (vw_rfm). 'Most valuable' customers: use historical_clv or the Champions segment, and say which."
+  top_sellers: "'Top' or 'biggest' = highest total_revenue. 'Best' or 'top-performing' = highest performance_score among scored sellers (not 'Insufficient Data')."
+  top_categories_and_products: "Highest total_revenue. 'Most popular' = most orders (total_orders)."
+  best_rated: "Highest avg_review_score, restricted by min_volume_for_rankings."
+  worst_or_problem: "The reverse ordering of the same measure. For sellers 'problem sellers' = performance_tier 'Needs Work', plus the ml_seller_outliers table for high-revenue, low-quality sellers."
+
+not_available_in_the_data:
+  # The model must say so, not improvise, when asked for these.
+  - "Profit, margin, cost of goods, or any cost data: only prices and freight charged exist."
+  - "Refunds, returns or discounts: not recorded. Cancelled and unavailable orders exist as statuses, but no refund amounts."
+  - "Customer demographics (age, gender, income) or exact addresses: only city, state and a zip-code prefix exist."
+  - "Traffic, conversion, marketing spend or acquisition cost."
+  - "Inventory or stock levels."
+  - "Seller or Olist replies to reviews, or how quickly they respond (survey_response_time is the customer's own response time)."
+  - "Review sentiment or text analysis: comment text is stored but not analysed."
+  - "Anything after Aug 2018 for delivered-order metrics, and any forecast other than projected_clv_12m."
