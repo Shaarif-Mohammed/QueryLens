@@ -4,20 +4,22 @@ Setup check
 
 Confirms the two things the app needs before it can answer a question:
   1. The read-only database role can connect and see the warehouse.
-  2. Gemini answers on the configured model, through Vertex AI or the Gemini
-     Developer API, as set in .env.
+  2. Gemini answers, through the same route the app uses (Vertex AI or the
+     Gemini Developer API, as set in .env), on the main model and each backup.
 
 Run from the project root:  python scripts/check_setup.py
-Nothing is written to the database. The Gemini check is one tiny request.
+Nothing is written to the database. Each Gemini check is one tiny request.
 """
 
 import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+ROOT = next(p for p in Path(__file__).resolve().parents if (p / "metadata").is_dir())
+sys.path.insert(0, str(ROOT))
 
-ROOT = Path(__file__).resolve().parents[1]
+from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv(ROOT / ".env")
 
 EXPECTED = {"view": 13, "dim/fact table": 9, "ml table": 4}
@@ -84,43 +86,49 @@ def check_database() -> bool:
 
 
 def check_gemini() -> bool:
-    from google import genai
+    from google.genai import types
+
+    from app.llm.sql_generator import DEFAULT_FALLBACK_MODELS, DEFAULT_MODEL, _make_client
 
     vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in {"1", "true", "yes"}
+    if vertex:
+        print(f"\n--- Gemini via Vertex AI (project {os.getenv('GOOGLE_CLOUD_PROJECT')}, "
+              f"location {os.getenv('GOOGLE_CLOUD_LOCATION', 'global')}) ---")
+        key = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+        if not key or not Path(key).is_file():
+            print(f"Key file not found: {key or '(GOOGLE_APPLICATION_CREDENTIALS is empty)'}")
+            print("Gemini check: FAILED")
+            return False
+    else:
+        print("\n--- Gemini via the Gemini Developer API (AI Studio key) ---")
+
     try:
-        if vertex:
-            project = os.getenv("GOOGLE_CLOUD_PROJECT")
-            location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
-            print(f"\n--- Gemini via Vertex AI (project {project}, location {location}) ---")
-            key = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
-            if not key or not Path(key).is_file():
-                print(f"Key file not found: {key or '(GOOGLE_APPLICATION_CREDENTIALS is empty)'}")
-                print("Gemini check: FAILED")
-                return False
-            client = genai.Client(vertexai=True, project=project, location=location)
-        else:
-            print("\n--- Gemini via the Gemini Developer API (AI Studio key) ---")
-            api_key = os.getenv("GEMINI_API_KEY", "")
-            if not api_key or api_key.startswith("your-"):
-                print("GEMINI_API_KEY is not set.")
-                print("Gemini check: FAILED")
-                return False
-            client = genai.Client(api_key=api_key)
+        client = _make_client()
     except Exception as exc:  # noqa: BLE001
         print("Could not create the Gemini client:", exc)
         print("Gemini check: FAILED")
         return False
 
-    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-    try:
-        reply = client.models.generate_content(model=model, contents="Reply with the single word OK.")
-        print(f"  {model:22} answered: {(reply.text or '').strip()[:20]!r}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"  {model:22} FAILED: {str(exc)[:160]}")
-        print("Gemini check: FAILED")
-        return False
-    print("Gemini check: PASSED")
-    return True
+    main = os.getenv("GEMINI_MODEL") or DEFAULT_MODEL
+    backups = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS).split(",") if m.strip()]
+    config = types.GenerateContentConfig(
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
+    results = {}
+    for model in [main] + [m for m in backups if m != main]:
+        try:
+            reply = client.models.generate_content(model=model, contents="Reply with the single word OK.", config=config)
+            results[model] = True
+            print(f"  {model:22} answered: {(reply.text or '').strip()[:20]!r}")
+        except Exception as exc:  # noqa: BLE001
+            results[model] = False
+            print(f"  {model:22} FAILED: {str(exc)[:160]}")
+
+    ok = any(results.values())
+    if ok and not results[main]:
+        print("Main model failed but a backup answered: the app will work, using the backup.")
+    print("Gemini check:", "PASSED" if ok else "FAILED")
+    return ok
 
 
 if __name__ == "__main__":
