@@ -20,7 +20,7 @@ conventions:
   percent_scale: "Columns ending _pct, and rate columns such as on_time_rate and cancellation_rate, are on a 0-100 scale (88.77 means 88.77%), not 0-1. Do not multiply by 100 again."
   rounding: "Aggregate unrounded values, then round for display: money to 2 decimals, percentages to 1-2 decimals."
   ambiguity_policy: "If a term maps to more than one metric below, use the stated default, name the choice in the explanation, and mention the alternative in one line. Do not ask a clarifying question for something that has a default."
-  min_volume_for_rankings: "When ranking or filtering sellers by an average or a rate (avg_review_score, on_time_rate, cancellation_rate, performance_score), require total_orders >= 5, matching the scoring population of vw_seller_performance, and say so. Results based on fewer than about 30 orders or reviews are still flagged as small samples."
+  min_volume_for_rankings: "When ranking or filtering sellers by an average or a rate, require at least 5 in that measure's own base and say so: delivered_orders >= 5 for delivery measures (on_time_rate, avg_delivery_days); total_reviews >= 5 for review measures (avg_review_score, pct_5_star, pct_1_star); total_orders >= 5 for performance_score and cancellation_rate (matching the scoring population of vw_seller_performance). Results based on fewer than about 30 orders or reviews are still flagged as small samples."
 
 metrics:
 
@@ -316,6 +316,7 @@ ranking_defaults:
   top_categories_and_products: "Highest total_revenue. 'Most popular' = most orders (total_orders)."
   best_rated: "Highest avg_review_score, restricted by min_volume_for_rankings."
   worst_or_problem: "The reverse ordering of the same measure. For sellers 'problem sellers' = performance_tier 'Needs Work', plus the ml_seller_outliers table for high-revenue, low-quality sellers."
+  high_threshold: "When a question filters on 'high', 'large' or 'top' revenue or volume without giving a number (e.g. 'high revenue but poor delivery'), use the top quarter: revenue_percentile >= 75 in vw_seller_performance, or the top 25% of the measure elsewhere. State the threshold and name the median (>= 50) as the looser alternative. 'Poor' or 'low' on a rate means ranking by that rate ascending, within min_volume_for_rankings."
 
 not_available_in_the_data:
   # The model must say so, not improvise, when asked for these.
