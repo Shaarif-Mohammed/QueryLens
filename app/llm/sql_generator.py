@@ -36,12 +36,20 @@ DEFAULT_FALLBACK_MODELS = "gemini-3.8-flash"
 RETRYABLE_STATUS_CODES = {429, 500, 503, 504}
 # Model retired or unknown: skip straight to the next model.
 SKIP_MODEL_STATUS_CODES = {404}
+# Rate limited (429): a quota or rate limit was reached. A retry seconds later rarely
+# succeeds and may use up more quota, so move to the next model at once.
+QUOTA_STATUS_CODES = {429}
+# Request ran past its deadline (server 504 or client timeout). The same model is
+# likely to stall again, so hand the question to the next model at once; only the
+# last model is retried. Each stall already cost REQUEST_TIMEOUT_SECONDS.
+STALL_CODES = {504, "timeout/network"}
 ATTEMPTS_PER_MODEL = 3
 BASE_DELAY_SECONDS = 2.0
 MAX_DELAY_SECONDS = 20.0
 # A single request that takes longer than this is treated as a failed attempt and
-# retried or passed to the backup, instead of holding the question indefinitely.
-REQUEST_TIMEOUT_SECONDS = 45
+# retried or passed to the backup. A healthy SQL call usually finishes within 20 s, so a
+# much longer wait is almost always a stuck request. GEMINI_REQUEST_TIMEOUT_SECONDS overrides it.
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "25"))
 
 
 class SqlResponse(BaseModel):
@@ -176,6 +184,12 @@ def call_with_fallback(client, models: list[str], contents: str, config) -> Mode
                 if code != "timeout/network" and code not in RETRYABLE_STATUS_CODES:
                     # Bad request, bad key, permission: another model will not help.
                     return ModelCall(None, model, total_attempts, retry_log, last_error)
+                if code in QUOTA_STATUS_CODES:
+                    retry_log.append(f"{model} attempt {attempt}: {code} quota/rate limit, moving to next model")
+                    break
+                if code in STALL_CODES and model != models[-1]:
+                    retry_log.append(f"{model} attempt {attempt}: {code} (stalled), moving to next model")
+                    break
                 if attempt < ATTEMPTS_PER_MODEL:
                     delay = _backoff_delay(attempt)
                     retry_log.append(f"{model} attempt {attempt}: {code}, retrying in {delay:.1f}s")
