@@ -101,6 +101,7 @@ class SqlGenerator:
             response_mime_type="application/json",
             response_schema=SqlResponse,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            thinking_config=thinking_config("GEMINI_SQL_THINKING_BUDGET"),
         )
 
     def count_prompt_tokens(self) -> int:
@@ -159,6 +160,7 @@ class ModelCall:
 
 def call_with_fallback(client, models: list[str], contents: str, config) -> ModelCall:
     """Send one request, retrying and moving to backup models as the error requires.
+    Shared by every model call in QueryLens, so all calls fail and recover the same way.
     Errors that are neither API errors nor network errors are re-raised."""
     retry_log: list[str] = []
     total_attempts = 0
@@ -213,6 +215,13 @@ def configured_models(model: str | None = None, fallback_models: list[str] | Non
     return [main] + [m for m in fallback_models if m != main]
 
 
+def thinking_config(env_name: str) -> types.ThinkingConfig | None:
+    """Optional thinking budget (tokens) from .env; unset keeps the model's default.
+    A model that does not accept the value answers 400, which stops the request."""
+    raw = os.getenv(env_name, "").strip()
+    return types.ThinkingConfig(thinking_budget=int(raw)) if raw else None
+
+
 def using_vertex_ai() -> bool:
     """True when .env selects Vertex AI (GOOGLE_GENAI_USE_VERTEXAI=true)."""
     return os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in {"1", "true", "yes"}
@@ -256,14 +265,18 @@ def _backoff_delay(attempt: int) -> float:
 
 
 def _parse(response) -> SqlResponse | None:
-    """The structured answer, from the SDK's parsed value or the raw JSON text."""
+    return _parse_model(response, SqlResponse)
+
+
+def _parse_model(response, schema: type[BaseModel]):
+    """The structured answer as `schema`, from the SDK's parsed value or the raw JSON text."""
     parsed = getattr(response, "parsed", None)
-    if isinstance(parsed, SqlResponse):
+    if isinstance(parsed, schema):
         return parsed
     text = response.text or ""
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
     try:
-        return SqlResponse.model_validate_json(text)
+        return schema.model_validate_json(text)
     except Exception:
         return None
 
