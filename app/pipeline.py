@@ -4,13 +4,17 @@ Question pipeline
 
 Takes one plain-English question through every step that produces data:
 
-    question -> SQL generator -> SQL validator -> query executor -> DataFrame
+    question -> SQL generator -> SQL validator -> query executor -> DataFrame -> profile
 
 and stops at the first step that cannot continue. Nothing reaches the database unless
 the model produced a query (not a refusal) and that query passed the validator. The
 result keeps every intermediate output, so the interface can show the SQL, the
 assumptions and any warnings alongside the data, and explain exactly where a question
 stopped.
+
+The written explanation is a separate step (explain_answer), so the interface can show
+the SQL, table and chart as soon as the data arrives and add the explanation after.
+A failed explanation never hides the data: the table is still the answer.
 """
 
 from __future__ import annotations
@@ -22,10 +26,12 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 import pandas as pd
 
+from app.analytics.analyzer import ResultProfile, profile_result
 from app.database.query_executor import ExecutionResult, execute_validated
 from app.validation.sql_validator import ValidationResult, validate_sql
 
 if TYPE_CHECKING:
+    from app.llm.response_generator import ExplanationGenerator, ExplanationResult
     from app.llm.sql_generator import GenerationResult, SqlGenerator
 
 logger = logging.getLogger(__name__)
@@ -53,6 +59,7 @@ MESSAGES = {
     "connection": "QueryLens could not reach the warehouse just now. Please try again in a moment.",
     "database": "The warehouse could not run the generated query.",
     "cannot_answer": "This question is outside what the marketplace data covers.",
+    "explanation_failed": "The written explanation could not be produced just now; the table shows the answer.",
 }
 
 
@@ -64,6 +71,8 @@ class PipelineResult:
     generation: GenerationResult | None = None
     validation: ValidationResult | None = None
     execution: ExecutionResult | None = None
+    profile: ResultProfile | None = None  # set when answered
+    explanation: ExplanationResult | None = None  # set by explain_answer
     timings: dict[str, float] = field(default_factory=dict)  # seconds per step
 
     @property
@@ -93,6 +102,7 @@ class PipelineResult:
 
 
 _default_generator: SqlGenerator | None = None
+_default_explainer: ExplanationGenerator | None = None
 
 
 def get_generator() -> SqlGenerator:
@@ -103,6 +113,16 @@ def get_generator() -> SqlGenerator:
 
         _default_generator = SqlGenerator()
     return _default_generator
+
+
+def get_explainer() -> ExplanationGenerator:
+    """One shared explanation generator, reusing the SQL generator's API client."""
+    global _default_explainer
+    if _default_explainer is None:
+        from app.llm.response_generator import ExplanationGenerator
+
+        _default_explainer = ExplanationGenerator(client=get_generator().client)
+    return _default_explainer
 
 
 def answer_question(
@@ -160,10 +180,43 @@ def answer_question(
         key = execution.error_kind if execution.error_kind in MESSAGES else "database"
         return _stop(result, "execution_failed", MESSAGES[key], detail=execution.error)
 
+    result.profile = profile_result(
+        execution.dataframe, execution.sql, response.measure_used, execution.truncated
+    )
     logger.info(
         "answered in %.1fs (%s rows): %s",
         sum(result.timings.values()), execution.row_count, question[:80],
     )
+    return result
+
+
+def explain_answer(result: PipelineResult, *, explainer=None) -> PipelineResult:
+    """Add the written explanation to an answered question. Does nothing otherwise.
+    A failure is recorded in result.explanation and never changes result.status."""
+    if not result.ok or result.profile is None:
+        return result
+    response = result.generation.response
+    started = time.monotonic()
+    try:
+        result.explanation = (explainer or get_explainer()).explain(
+            result.question, response.measure_used, list(response.assumptions),
+            result.dataframe, result.profile,
+        )
+    except Exception as exc:  # noqa: BLE001 — the data is still the answer
+        logger.exception("Explanation raised")
+        from app.llm.response_generator import ExplanationResult
+
+        result.explanation = ExplanationResult(
+            response=None, model="", attempts=0, latency_seconds=time.monotonic() - started, error=str(exc)
+        )
+    result.timings["explanation"] = time.monotonic() - started
+    if not result.explanation.ok:
+        logger.warning("explanation failed: %s | question: %s", result.explanation.error, result.question[:80])
+    elif result.explanation.ungrounded_numbers:
+        logger.warning(
+            "explanation has numbers not found in the result: %s | question: %s",
+            result.explanation.ungrounded_numbers, result.question[:80],
+        )
     return result
 
 
