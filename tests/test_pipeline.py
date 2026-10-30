@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from app.database.query_executor import ExecutionResult
-from app.pipeline import MAX_QUESTION_CHARS, answer_question
+from app.pipeline import MAX_QUESTION_CHARS, answer_question, explain_answer
 from app.validation.sql_validator import ValidationResult
 
 GOOD_SQL = "SELECT segment, COUNT(*) AS customers FROM warehouse.vw_rfm GROUP BY segment ORDER BY segment"
@@ -143,4 +143,64 @@ def test_empty_and_overlong_questions_never_reach_the_model():
     for question in ["", "   ", "x" * (MAX_QUESTION_CHARS + 1)]:
         result, generator, executor = ask(question)
         assert result.status == "invalid_question" and generator.calls == [] and executor.received == []
+
+
+# ------------------------------------------------------------ profile and explanation
+
+
+@dataclass
+class FakeExplanation:
+    response: object = "explained"
+    error: str | None = None
+    ungrounded_numbers: list = field(default_factory=list)
+
+    @property
+    def ok(self):
+        return self.error is None and self.response is not None
+
+
+class FakeExplainer:
+    def __init__(self, result=None, raises=None):
+        self.result, self.raises, self.calls = result or FakeExplanation(), raises, []
+
+    def explain(self, question, measure_used, assumptions, df, profile):
+        self.calls.append((question, measure_used, assumptions, profile))
+        if self.raises:
+            raise self.raises
+        return self.result
+
+
+def test_answered_question_gets_a_profile():
+    result, _, _ = ask()
+    assert result.profile is not None and result.profile.primary_measure == "customers"
+    assert result.profile.complete  # 1 row under the appended LIMIT 500
+
+
+def test_explanation_receives_question_measure_notes_and_profile():
+    result, _, _ = ask()
+    explainer = FakeExplainer()
+    explain_answer(result, explainer=explainer)
+    assert result.explanation.ok and "explanation" in result.timings
+    question, measure, notes, profile = explainer.calls[0]
+    assert question == result.question and measure == "customers per segment" and profile is result.profile
+
+
+def test_failed_explanation_keeps_the_answer():
+    result, _, _ = ask()
+    explain_answer(result, explainer=FakeExplainer(FakeExplanation(response=None, error="All models unavailable.")))
+    assert result.status == "answered" and result.dataframe is not None and not result.explanation.ok
+
+
+def test_explainer_exception_keeps_the_answer():
+    result, _, _ = ask()
+    explain_answer(result, explainer=FakeExplainer(raises=RuntimeError("boom")))
+    assert result.status == "answered" and not result.explanation.ok and "boom" in result.explanation.error
+
+
+def test_no_explanation_for_unanswered_questions():
+    response = FakeResponse(status="cannot_answer", sql="", cannot_answer_reason="No cost data.")
+    result, _, _ = ask(generation=FakeGeneration(response))
+    explainer = FakeExplainer()
+    explain_answer(result, explainer=explainer)
+    assert explainer.calls == [] and result.explanation is None
 
