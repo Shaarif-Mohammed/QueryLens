@@ -126,10 +126,13 @@ def _show_explanation(explanation) -> None:
     print(f"EXPLANATION: {r.explanation}")
     for c in r.caveats:
         print(f"  caveat: {c}")
+    rewritten = " (after one rewrite)" if explanation.regenerated else ""
     if explanation.ungrounded_numbers:
-        print(f"!! Numbers not found in the result: {explanation.ungrounded_numbers}")
+        print(f"!! Numbers not found in the result{rewritten}: {explanation.ungrounded_numbers}")
     else:
-        print("Numbers check: every figure appears in the result.")
+        print(f"Numbers check: every figure appears in the result{rewritten}.")
+    if explanation.banned_terms:
+        print(f"!! Overstated wording{rewritten}: {explanation.banned_terms}")
 
 
 def main() -> int:
@@ -169,6 +172,10 @@ def main() -> int:
         if r.explanation is not None:
             flag = "explanation failed" if not r.explanation.ok else (
                 f"ungrounded {r.explanation.ungrounded_numbers}" if r.explanation.ungrounded_numbers else "numbers ok")
+            if r.explanation.banned_terms:
+                flag += f" wording {r.explanation.banned_terms}"
+            if r.explanation.regenerated:
+                flag += " (rewritten)"
         print(f"  {r.status:18} {total:6.1f}s  rows={rows!s:>4}  {flag:20}  {r.question[:50]}")
     return 0
 
