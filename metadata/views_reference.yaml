@@ -32,7 +32,7 @@ warehouse:
     - "Views default to delivered orders only, unless the question is specifically about order status, cancellations, or the full order funnel — in which case use dim_order directly instead of a view."
     - "Column names are NOT uniform across views and tables — copy them exactly from each view's `columns` list. Known traps: `category` (views and ml_* tables) vs product_category_name_english (dim_product); `state` (vw_regional_analysis) vs customer_state (dim_customer); `rfm_segment` (vw_clv) vs `segment` (vw_rfm); British 'instalment' spelling in vw_payment_behaviour vs 'installments' in fact_payments."
     - "Discriminator and categorical values are case- and spelling-sensitive — copy them exactly: entity_type is 'Customer' / 'Seller' (capitalised), vw_delivery_experience labels use 'On-Time' and 'National', review score labels in vw_review_response_intelligence are TEXT ('1'..'5'), and instalment bands are labelled '1 (Single)', '2-3', '4-6', '7-12', '12+'. A wrong value silently returns zero rows."
-    - "For RFM segment questions use vw_rfm.segment. vw_clv.rfm_segment re-evaluates vw_rfm inside the vw_clv query, so its segment counts differ slightly; use it only for questions that stay inside vw_clv, such as CLV tier by segment."
+    - "For RFM segment questions use vw_rfm.segment. vw_clv.rfm_segment is read from vw_rfm and matches it; use it only for questions that stay inside vw_clv, such as CLV tier by segment."
     - "Do not re-derive logic (RFM scores, CLV, performance tiers, health status) that a view already computes — use the view's output column directly rather than reconstructing the calculation from raw tables."
 
 views:
@@ -43,12 +43,13 @@ views:
     reference_date: "2018-09-01"
     naming_note: "The monetary value column is `total_spend`; the segment column is `segment`."
     row_count: 93358   # customers with at least one delivered order (of 96,096 unique customers)
-    known_discrepancy: "Segment counts differ slightly from vw_clv.rfm_segment (for example Loyal 26,326 here vs 26,407 in vw_clv, Champions 3,853 vs 3,800). vw_clv left-joins vw_rfm, which re-runs NTILE(5) on order_count; about 97% of customers tie at 1 order, so the ties are split arbitrarily and differently on each evaluation. Use this view for segment counts."
+    stability_note: "Every NTILE breaks ties by customer_unique_id, so scores and segments are identical on every run, and vw_clv.rfm_segment matches this view's segment."
     logic: >
       Recency = days between last delivered order and the reference date. Frequency =
       count of distinct delivered orders. Monetary = sum of order totals across all
       delivered orders (collapsed to order level before aggregation). Each dimension
-      is scored 1-5 via NTILE(5); Recency is inverted so fewer days = higher score.
+      is scored 1-5 via NTILE(5), with customer_unique_id as the tie-breaker; Recency
+      is inverted so fewer days = higher score.
       Segment is assigned from the R and F score combination only — M score is used
       for ordering within segments, not for segmentation itself.
     segment_definitions:
@@ -63,11 +64,12 @@ views:
       - {segment: "About to Sleep", r_score: "<= 2", f_score: "<= 2"}
       - {segment: "Uncategorised", r_score: "else", f_score: "else", note: "defensive fallback; should never actually fire since the other nine conditions are exhaustive; confirmed live: no rows have this segment"}
     known_limitations:
-      - "About 97% of customers placed one order, so NTILE(5) splits the ties on order_count arbitrarily: a one-order customer can get f_score 4 or 5 and a segment such as 'Loyal' or 'Champions'. A segment label does not by itself mean repeat purchases; order_count shows that. Segment sizes can also vary slightly between runs."
+      - "About 97% of customers placed one order, so the frequency score splits customers with the same order count by ID: a one-order customer can get f_score 4 or 5 and a segment such as 'Loyal' or 'Champions'. A segment label does not by itself mean repeat purchases; order_count shows that."
     key_columns:
       - {name: rfm_score, description: "Combined score string, e.g. '5-4-3' (R-F-M)."}
       - {name: rfm_composite, description: "Simple average of R, F, M scores (max 5.0)."}
       - {name: segment, description: "Human-readable segment label, see segment_definitions."}
+    evaluation_reference: "Stable segment counts after the tie-breaker fix (identical on repeated runs): Loyal 26,165; About to Sleep 15,004; Potential Loyal 11,256; Need Attention 11,204; At Risk 7,468; Cannot Lose Them 7,393; Promising 7,362; Champions 3,784; Recent 3,722; total 93,358."   # evaluation_reference: excluded from the prompt
     columns:   # complete list, verified against the live schema
       - {name: customer_unique_id, type: varchar}
       - {name: r_score, type: int}
@@ -88,7 +90,7 @@ views:
     grain: "One row per customer_unique_id."
     naming_note: "The RFM segment column here is `rfm_segment` (vw_rfm calls it `segment`). r_score, f_score, m_score, order_count, avg_order_value, first/last_order_date and days_since_last_order are also exposed directly."
     row_count: 93358
-    known_discrepancy: "rfm_segment re-evaluates vw_rfm inside this view's query, so its segment counts differ slightly from vw_rfm.segment. Use it only for questions entirely inside vw_clv; for segment counts use vw_rfm."
+    stability_note: "rfm_segment is read from vw_rfm and matches vw_rfm.segment. Use it only for questions entirely inside vw_clv."
     logic: >
       historical_clv is actual total spend on all delivered orders (collapsed to order
       level before aggregation). projected_clv_12m uses two paths: one-time buyers get
@@ -96,7 +98,7 @@ views:
       repeat buyers get projected_clv_12m = avg_order_value * MIN(annualised_purchase_rate, 12),
       with the purchase rate capped at 12/year to prevent inflation from customers who
       placed multiple orders in a very short window. clv_tier is NTILE(3) on
-      projected_clv_12m -> High / Mid / Low.
+      projected_clv_12m (ties broken by customer_unique_id) -> High / Mid / Low.
     joins: "Joins to vw_rfm to bring in the RFM segment for combined customer analysis."
     known_limitations:
       - "Simplified projection model, not BG/NBD or Pareto/NBD — a probabilistic model would need longer purchase history than this 2-year dataset provides."
@@ -107,6 +109,7 @@ views:
       - {name: projected_clv_12m, description: "Estimated next-12-month spend."}
       - {name: annualised_purchase_rate, description: "Estimated orders per year, capped at 12."}
       - {name: avg_days_between_orders, description: "NULL for one-time buyers."}
+    evaluation_reference: "clv_tier after the tie-breaker fix (stable): High 31,119; Mid 31,119; Low 31,120."   # evaluation_reference: excluded from the prompt
     columns:   # complete list, verified against the live schema
       - {name: customer_unique_id, type: varchar}
       - {name: order_count, type: bigint}
@@ -157,14 +160,14 @@ views:
   vw_seller_performance:
     business_question: "Which sellers are performing well across revenue, reviews, and delivery, and which need intervention?"
     grain: "One row per seller_id."
-    row_count: 3095   # 1,404 Elite, 374 Strong, 15 Average, 1 Needs Work, 1,301 Insufficient Data
+    row_count: 3095   # 1,404 Elite, 374 Strong, 15 Average, 1 Needs Work, 1,301 Insufficient Data (re-verified after the tie-breaker fix: unchanged)
     logic: >
       Revenue totals at item level; avg_order_value calculated at order level to avoid
       multi-item inflation. On-time delivery calculated at order level (deduplicated).
       Review metrics deduplicated to order grain before joining, so a multi-item order
       contributes exactly one review score per seller. performance_score (0-100) is a
       weighted composite: 40% avg review score (normalised 0-100), 30% on-time
-      delivery rate, 20% revenue percentile (NTILE 1-100), 10% low cancellation rate
+      delivery rate, 20% revenue percentile (NTILE 1-100, ties broken by seller_id), 10% low cancellation rate
       (inverted: 100 - cancellation_rate). Sellers with fewer than 5 orders are
       excluded from scoring and get performance_tier = 'Insufficient Data'.
     performance_tiers:

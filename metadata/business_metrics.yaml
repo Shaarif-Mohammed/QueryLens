@@ -147,7 +147,8 @@ metrics:
     definition: "Customers scored 1-5 on recency, frequency and monetary value; the segment label comes from the R and F scores only. Full segment rules are in views_reference.yaml (vw_rfm)."
     source_columns: [vw_rfm.segment, vw_rfm.rfm_score, vw_rfm.rfm_composite, vw_rfm.total_spend]
     notes:
-      - "Use vw_rfm.segment for segment questions. vw_clv.rfm_segment is vw_rfm re-evaluated inside the vw_clv query, and f_score ties are split arbitrarily, so its counts differ slightly."
+      - "Use vw_rfm.segment for segment questions. Segments are stable between runs, and vw_clv.rfm_segment matches vw_rfm.segment."
+      - "About 97% of customers placed one order, so a frequency-based label such as 'Loyal' does not by itself mean repeat purchases; order_count shows that."
 
   # --------------------------------------------------------------- delivery
   delivery_days:
@@ -262,7 +263,7 @@ consistency_rules:
 
   canonical_source:
     # Where a measure exists in several views, always use this one. The right-hand text is the reason.
-    rfm_segment_counts_and_membership: "vw_rfm.segment. vw_clv.rfm_segment re-evaluates vw_rfm and its counts differ slightly; use it only for questions that are entirely inside vw_clv (for example CLV tier by segment)."
+    rfm_segment_counts_and_membership: "vw_rfm.segment. vw_clv.rfm_segment is read from vw_rfm and matches it; use it only for questions that are entirely inside vw_clv (for example CLV tier by segment)."
     customer_counts_by_state: "vw_regional_analysis.unique_customers (delivered orders, by customer state)."
     customer_status_counts: "vw_customer_health.customer_status. Do not derive Active/Dormant/Lost from vw_rfm."
     monthly_revenue_and_orders: "vw_new_vs_returning_revenue (one row per month, zero-filled). Do not rebuild monthly totals from fact tables unless the question needs a dimension the view lacks."
@@ -274,11 +275,11 @@ consistency_rules:
     average_review_score_by_seller_state_or_category: "The view for that grain: vw_seller_performance (seller), vw_regional_analysis (state), vw_product_customer_affinity (category)."
     payment_mix: "vw_payment_behaviour (dimension = 'By Payment Type')."
 
-  segment_counts_are_not_exact:
-    - "RFM segment sizes vary slightly between runs, because NTILE splits tied customers arbitrarily. Report counts as returned and add one line: 'Segment sizes can vary slightly between runs.'"
-    - "Do not draw conclusions from small differences between segments (for example a gap of under about 2%)."
-    - "Prefer shares and rankings of segments over exact counts."
-    - "Never compare vw_rfm counts with vw_clv counts: they come from separate evaluations."
+  segment_labels_and_frequency:
+    - "RFM segments are stable between runs: every NTILE score breaks ties by customer_unique_id."
+    - "About 97% of customers placed one order, so the frequency score splits customers with the same order count by ID. A label such as 'Loyal' or 'Champions' does not by itself mean repeat purchases."
+    - "When reporting segment counts or membership, add one short line: 'Most customers have placed a single order, so labels such as Loyal don't necessarily mean repeat purchases.'"
+    - "Do not draw conclusions from small differences between segments (for example a gap of under 2%)."
 
   same_word_different_meaning:
     # A column name is not proof of equal meaning across views.
