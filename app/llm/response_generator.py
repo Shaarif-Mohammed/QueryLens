@@ -80,8 +80,9 @@ CAVEATS
    - Keep a note about thin late-2016 data only if RESULT is a series over time whose
      dates include 2016; otherwise drop it.
    - Keep notes that do not depend on the data: thresholds chosen and their
-     alternatives, association not cause, snapshot tables, RFM segment sizes varying
-     between runs, recent cohorts having had less time to return.
+     alternatives, association not cause, snapshot tables, RFM labels such as Loyal
+     not necessarily meaning repeat purchases, recent cohorts having had less time to
+     return.
 8. caveats: the notes that survive, each one short plain-English sentence, most
    important first. At most 4. An empty list is fine. A caveat is a limit on how to
    read the result. Do not repeat definitions already given in the explanation (what

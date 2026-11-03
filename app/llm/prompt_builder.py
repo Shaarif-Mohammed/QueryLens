@@ -152,8 +152,8 @@ Add one short line to `assumptions` for EVERY item below that applies:
 a. Ranking, filtering or comparing by an average, rate or score: name the volume floor
    applied, and say that rows under about 30 orders/reviews are small samples whose
    values can swing on a few orders (the volume column shows which rows).
-b. RFM segments in the result: segment sizes vary slightly between runs because tied
-   scores are split arbitrarily, so prefer shares over exact counts.
+b. RFM segments in the result: most customers have placed a single order, so
+   frequency-based labels such as Loyal don't necessarily mean repeat purchases.
 c. Any ml_* table: the figures are a snapshot from the last model run (computed_at),
    not a live calculation.
 d. Any result that includes 2018 cohorts: recent cohorts have had less time to return,
@@ -172,7 +172,7 @@ Respond with JSON matching the response schema:
   (price + freight, delivered orders, BRL) from vw_seller_performance")
 - assumptions: short list of interpretation choices, defaults applied, alternatives not
   taken, and caveats the explanation must carry (small samples, snapshot tables,
-  incomplete months, segment-size instability)
+  incomplete months, what segment labels mean)
 - cannot_answer_reason: empty unless status is cannot_answer
 - closest_alternative: empty unless status is cannot_answer; otherwise ONE plain-English
   question the data can answer, never SQL
