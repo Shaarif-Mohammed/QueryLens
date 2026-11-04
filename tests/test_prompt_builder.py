@@ -48,6 +48,7 @@ LEAK_CANARIES = [
     "76.93",                              # credit card share of orders
     "4.29",                               # on-time review average
     "~49% of customers",                  # customer Pareto
+    "26,165",                             # stable Loyal segment count (vw_rfm)
 ]
 
 

@@ -92,13 +92,14 @@ def test_non_time_series_has_no_late_2016_caveat(explainer):
 
 def test_complete_segment_counts_use_the_real_total(explainer):
     df = pd.DataFrame({"segment": ["Loyal", "About to Sleep", "Champions"],
-                       "customer_count": [26407, 15422, 3800]})
+                       "customer_count": [26165, 15004, 3784]})
     r = explain(
         explainer, "How many customers are in each RFM segment?", df,
         "SELECT segment, COUNT(customer_unique_id) AS customer_count FROM warehouse.vw_rfm "
         "GROUP BY segment ORDER BY customer_count DESC, segment\nLIMIT 500",
         "customer_count per RFM segment from vw_rfm",
-        ["Segment sizes can vary slightly between runs because tied scores are split arbitrarily."],
+        ["Most customers have placed a single order, so labels such as Loyal don't necessarily mean repeat purchases."],
     )
     assert "Loyal" in r.headline + r.explanation
-    assert "vary" in caveats_text(r) or "between runs" in caveats_text(r)
+    assert any(k in caveats_text(r) for k in ("single order", "one order", "repeat"))
+    assert "between runs" not in caveats_text(r)

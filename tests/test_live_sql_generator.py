@@ -91,8 +91,8 @@ def test_rfm_segments_use_canonical_view(generator):
     x = answer(generator, "How many customers are in each RFM segment?")
     sql = norm(x.sql)
     assert "warehouse.vw_rfm" in sql and "vw_clv" not in sql and "group by segment" in sql
-    assert any("vary" in a.lower() or "tie" in a.lower() for a in x.assumptions), \
-        "segment-size caveat missing"
+    assert any(k in a.lower() for a in x.assumptions for k in ("single order", "one order", "repeat")), \
+        "segment-label caveat missing (single orders do not mean repeat purchases)"
     assert_valid(x.sql)
 
 
