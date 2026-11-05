@@ -8,7 +8,7 @@ two-group comparisons, monthly series).
 
 import pandas as pd
 
-from app.analytics.analyzer import format_number, profile_result, rows_for_model, short_label
+from app.analytics.analyzer import format_number, grid_table, profile_result, rows_for_model, short_label
 
 SELLER_ID = "b1b3948701c5c72445495bd161b83a4c"
 
@@ -131,4 +131,107 @@ def test_rows_for_model_caps_rows():
 def test_helpers():
     assert short_label(SELLER_ID) == "b1b39487…" and short_label("SP") == "SP" and short_label("At Risk") == "At Risk"
     assert format_number(26407) == "26,407" and format_number(985491.644) == "985,491.64"
+
+
+# ------------------------------------------------------------ dimensions, grids, pairs
+
+
+def heatmap_frame():
+    rows = []
+    for k, month in enumerate(["January", "February", "March"], start=1):
+        for j, cat in enumerate(["bed_bath_table", "health_beauty", "auto"]):
+            rows.append({"order_month_num": k, "order_month": month, "category": cat,
+                         "monthly_revenue": [4637.60, 13802.80, 5386.38, 18462.71, 25178.32, 9000.0,
+                                             29856.01, 29463.99, 9500.0][(k - 1) * 3 + j]})
+    return pd.DataFrame(rows)
+
+
+HEAT_HINT = "monthly_revenue (BRL) grouped by purchase month and product category"
+
+
+def test_month_number_is_a_dimension_not_a_measure():
+    p = profile_result(heatmap_frame(), "SELECT ...\nLIMIT 500", HEAT_HINT)
+    assert p.role("order_month_num") == "key" and p.primary_measure == "monthly_revenue"
+    assert p.sort_keys == {"order_month": "order_month_num"}
+    assert p.grid == ("category", "order_month")
+
+
+def test_grid_facts_name_both_sides_of_each_cell():
+    p = profile_result(heatmap_frame(), "SELECT ...\nLIMIT 500", HEAT_HINT)
+    assert any("Highest single cell: 29,856.01 (bed_bath_table, March)" in f for f in p.facts)
+    assert any("lowest single cell: 4,637.60 (bed_bath_table, January)" in f for f in p.facts)
+    assert any("Total monthly_revenue by order_month: highest March" in f for f in p.facts)
+    assert not any(f.startswith("Highest monthly_revenue") for f in p.facts)  # no single-name extremes
+
+
+def test_grid_goes_to_the_model_whole_with_columns_in_order():
+    df = heatmap_frame()
+    p = profile_result(df, "SELECT ...\nLIMIT 500", HEAT_HINT)
+    lines = rows_for_model(df, profile=p).splitlines()
+    assert lines[0] == "category,January,February,March" and len(lines) == 4
+    assert grid_table(df, p).index[0] == "health_beauty"  # largest total first
+
+
+def test_ranking_with_a_date_is_not_a_grid():
+    df = pd.DataFrame({"customer_unique_id": ["a" * 32, "b" * 32, "c" * 32, "d" * 32],
+                       "total_spend": [4.0, 3.0, 2.0, 1.0],
+                       "last_order_date": pd.to_datetime(["2017-09-29", "2018-07-15", "2018-03-01", "2018-01-01"])})
+    assert profile_result(df, "SELECT ... ORDER BY total_spend DESC LIMIT 10", "total_spend").grid is None
+
+
+def scatter_frame(n=40):
+    return pd.DataFrame({"seller_id": [f"{i:032x}" for i in range(n)],
+                         "total_revenue": [100000.0 - 2000 * i for i in range(n)],
+                         "on_time_rate": [85.0 if i < 10 else 95.0 for i in range(n)],
+                         "delivered_orders": [60] * n})
+
+
+def test_pair_facts_cover_every_row():
+    p = profile_result(scatter_frame(), "SELECT ... ORDER BY total_revenue DESC, seller_id LIMIT 500",
+                       "total_revenue (BRL) and on_time_rate from vw_seller_performance")
+    assert p.pair == ("total_revenue", "on_time_rate")
+    assert any("Across all 40 rows: the quarter with the highest total_revenue (10 rows) has a median "
+               "on_time_rate of 85; the quarter with the lowest total_revenue has a median on_time_rate of 95" in f
+               for f in p.facts)
+
+
+def test_pair_needs_exactly_two_named_measures_and_enough_rows():
+    hint = "total_revenue (BRL) and on_time_rate from vw_seller_performance"
+    assert profile_result(scatter_frame(10), "", hint).pair is None
+    assert profile_result(scatter_frame(), "", "total_revenue only").pair is None
+
+
+def test_sorting_groups_does_not_change_the_measure_without_a_top_n():
+    df = pd.DataFrame({"delivery_status": ["On-Time", "Late"], "total_orders": [88644, 7826],
+                       "avg_delivery_days": [10.4, 31.1], "avg_review_score": [4.29, 2.57]})
+    sql = "SELECT ... ORDER BY avg_delivery_days ASC\nLIMIT 500"
+    p = profile_result(df, sql, "avg_review_score and avg_delivery_days by delivery status")
+    assert p.primary_measure == "avg_review_score"
+
+
+def test_category_names_are_not_shortened_like_ids():
+    assert short_label("bed_bath_table") == "bed_bath_table" and short_label("computers_accessories") == "computers_accessories"
+
+
+def test_growth_from_an_almost_empty_period_is_left_out():
+    from app.analytics.analyzer import profile_result, rows_for_model
+    df = pd.DataFrame({
+        "order_month": pd.to_datetime(["2017-01-01", "2017-02-01", "2017-03-01", "2017-04-01"]),
+        "total_orders": [750, 1653, 2546, 2303],
+        "total_revenue": [127482.37, 271239.32, 414330.95, 390812.40],
+        "total_revenue_mom_growth_pct": [649657.24, 112.77, 52.75, -5.68],
+    })
+    p = profile_result(df, "SELECT * FROM warehouse.vw_x ORDER BY order_month",
+                       "total_revenue (BRL) by order_month")
+    assert p.tiny_base == {"total_revenue_mom_growth_pct": [0]}
+    assert any("2017-01-01" in f and "not meaningful" in f for f in p.facts)
+    sent = rows_for_model(df, profile=p)
+    assert "649657" not in sent and "112.77" in sent
+
+
+def test_ordinary_growth_and_falls_are_kept():
+    from app.analytics.analyzer import growth_from_tiny_base
+    df = pd.DataFrame({"revenue": [100.0, 50.0, 200.0], "revenue_growth_pct": [None, -50.0, 300.0],
+                       "orders": [10, 5, 20]})
+    assert growth_from_tiny_base(df) == {}
 
