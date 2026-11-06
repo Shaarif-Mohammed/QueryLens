@@ -6,7 +6,7 @@ Writes the plain-English answer for a query result. The model sees only:
 - the user's question,
 - the measure and notes written by the SQL step (before the data existed),
 - facts computed from the rows by the analyzer,
-- the rows themselves (rounded; at most 50).
+- the rows themselves (rounded; at most 50, or a whole two-way table as a grid).
 
 It never sees the warehouse or the metadata, so it can describe only what the query
 returned. After it answers, every number it wrote is checked against the numbers it
@@ -168,13 +168,7 @@ class ExplanationGenerator:
             result.regenerated = True
             problems = []
             if result.ungrounded_numbers:
-                problems.append(
-                    "used figures that are not in RESULT or FACTS: "
-                    + "; ".join(nearest_figure_hint(t, prompt) for t in result.ungrounded_numbers)
-                    + ". Quote only figures that appear there, rounded to the nearest value with at "
-                    "least three significant figures (85.96 becomes 86.0, not 85.9). If a figure was "
-                    "a threshold or bound you chose (\"above 90%\"), leave it out"
-                )
+                problems.append(ungrounded_note(result.ungrounded_numbers, prompt))
             if result.banned_terms:
                 problems.append(
                     "used " + ", ".join(f'"{t}"' for t in result.banned_terms)
@@ -191,20 +185,58 @@ def build_explanation_prompt(question: str, measure_used: str, assumptions: list
     notes = "\n".join(f"- {a}" for a in assumptions) or "- (none)"
     facts = "\n".join(f"- {f}" for f in profile.facts)
     shown = min(len(df), 50)
-    rows = rows_for_model(df) if len(df) else "(no rows)"
+    rows = rows_for_model(df, profile=profile) if len(df) else "(no rows)"
     return (
         f"QUESTION:\n{question.strip()}\n\n"
         f"MEASURE USED (written by the query step):\n{measure_used or '(not stated)'}\n\n"
         f"NOTES FROM THE QUERY STEP (written before the query ran; check each against FACTS):\n{notes}\n\n"
         f"FACTS (computed from the result by QueryLens; reliable):\n{facts}\n\n"
-        f"RESULT ({shown} of {len(df)} rows shown, CSV):\n{rows}"
+        + (f"RESULT (all {len(df)} rows, as a grid of {profile.grid[0]} by {profile.grid[1]}, CSV):\n{rows}"
+           if profile.grid and len(df) else f"RESULT ({shown} of {len(df)} rows shown, CSV):\n{rows}")
     )
+
+
+def ungrounded_note(tokens: list[str], source: str) -> str:
+    """The rewrite note for figures not found in the input. A near miss ("85.9%" for
+    85.96) gets the nearest real figure; a round milestone the model chose ("crossing
+    BRL 1.00 million", "above 90%") is named as such and must be deleted, because
+    pointing it to the nearest real figure does not tell the model to drop it."""
+    milestones = [t for t in tokens if is_round_milestone(t)]
+    near_misses = [t for t in tokens if t not in milestones]
+    parts = []
+    if near_misses:
+        parts.append(
+            "; ".join(nearest_figure_hint(t, source) for t in near_misses)
+            + ". Quote only figures that appear there, rounded to the nearest value with at "
+            "least three significant figures (85.96 becomes 86.0, not 85.9). If a figure was "
+            "a threshold or bound you chose (\"above 90%\"), leave it out"
+        )
+    if milestones:
+        parts.append(
+            ", ".join(f'"{t}"' for t in milestones)
+            + (" is a round threshold" if len(milestones) == 1 else " are round thresholds")
+            + " you chose, not figures from the data. Delete the words that mention "
+            + ("it" if len(milestones) == 1 else "them")
+            + " (such as \"crossing BRL 1 million\" or \"above 90%\") and do not put another "
+            "round number in their place; describe the change with figures from the data instead"
+        )
+    return "used figures that are not in RESULT or FACTS: " + ". ".join(parts)
+
+
+def is_round_milestone(token: str) -> bool:
+    """One significant digit: 1.00 million, 90.0%, 900,000, 5 million. Real figures
+    such as 985,491.64 or 85.96 have more."""
+    written = next(_numbers(token), None)
+    if written is None or written[0] == 0:
+        return False
+    digits = f"{written[0]:.12g}".replace(".", "").replace("e+", "e").split("e")[0].strip("0")
+    return len(digits) <= 1
 
 
 def nearest_figure_hint(token: str, source: str) -> str:
     """'85.9%' -> '85.9% (nearest figure in the data: 85.96)', so a rewrite can correct it."""
     written = next(_numbers(token), None)
-    available = [value for value, *_ in _numbers(source)]
+    available = _available_figures(source)
     if written is None or not available:
         return token
     nearest = min(available, key=lambda a: abs(a - written[0]))
@@ -259,7 +291,7 @@ def find_ungrounded_numbers(written: str, source: str) -> list[str]:
     """Numbers in `written` that match no number in `source`, allowing for honest
     rounding: to the decimals written (22.6 for 22.61), to a unit (985k, 5.77 million),
     or to trailing zeros within 0.5% (88,600 for 88,644 — but not 900,000 for 861,473)."""
-    available = [value for value, *_ in _numbers(source)]
+    available = _available_figures(source)
     ungrounded = []
     for value, text, tolerance, plain_whole in _numbers(written):
         if plain_whole and value <= IGNORE_WHOLE_NUMBERS_UP_TO:
@@ -267,6 +299,24 @@ def find_ungrounded_numbers(written: str, source: str) -> list[str]:
         if not any(abs(value - a) <= tolerance for a in available):
             ungrounded.append(text.strip())
     return list(dict.fromkeys(ungrounded))
+
+
+# The rows reach the model as CSV, where a comma separates fields and never groups
+# thousands: "2016-09-01,143.46" holds 143.46, not 1,143.46. Figures after this marker
+# are read as plain numbers; figures before it (question, notes, facts) may use commas.
+RESULT_MARKER = "\nRESULT ("
+PLAIN_NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w])")
+
+
+def _available_figures(source: str) -> list[float]:
+    """Every figure the model was given, read the right way for each part of the prompt."""
+    source = source or ""
+    head, marker, rows = source.partition(RESULT_MARKER)
+    if not marker:
+        return [value for value, *_ in _numbers(source)]
+    figures = [value for value, *_ in _numbers(head)]
+    figures += [float(m.group(0)) for m in PLAIN_NUMBER.finditer(rows)]
+    return figures
 
 
 def _numbers(text: str):

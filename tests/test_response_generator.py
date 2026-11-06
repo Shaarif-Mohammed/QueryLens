@@ -20,7 +20,9 @@ from app.llm.response_generator import (
     build_explanation_prompt,
     drop_inapplicable_caveats,
     find_ungrounded_numbers,
+    is_round_milestone,
     nearest_figure_hint,
+    ungrounded_note,
 )
 
 DF = pd.DataFrame({"delivery_status": ["On-Time", "Late"], "avg_review_score": [4.29, 2.57],
@@ -215,9 +217,93 @@ def test_both_problems_are_named_in_one_rewrite():
 
 
 def test_rewrite_note_names_the_nearest_real_figure():
+    from app.llm.response_generator import nearest_figure_hint
+
     source = "BA,18.90,85.96\nSC,14.50,90.24"
     assert nearest_figure_hint("85.9%", source) == "85.9% (nearest figure in the data: 85.96)"
     client = FakeClient(answer(explanation="Bahia is lowest at 85.9%."), answer())
     explain(client)
     assert "nearest figure in the data" in client.models.calls[1][1]
     assert "leave it out" in client.models.calls[1][1]
+
+# --------------------------------------------- figures in the CSV rows
+
+
+def _monthly_prompt():
+    df = pd.DataFrame({
+        # 143.46 is neither the highest nor the lowest, so it appears only in the rows.
+        "order_month": pd.to_datetime(["2016-09-01", "2016-10-01", "2016-11-01", "2017-11-01"]),
+        "total_revenue": [143.46, 46490.66, 0.0, 1153364.20],
+    })
+    sql = "SELECT order_month, total_revenue FROM warehouse.vw_new_vs_returning_revenue ORDER BY order_month"
+    profile = profile_result(df, sql, "total_revenue by month")
+    return build_explanation_prompt("How has monthly revenue changed?", "total_revenue by month", [], df, profile)
+
+
+def test_csv_field_comma_is_not_read_as_a_thousands_separator():
+    # In the rows "2016-09-01,143.46" the comma separates two fields; 143.46 is in the data.
+    prompt = _monthly_prompt()
+    assert "2016-09-01,143.46" in prompt
+    assert find_ungrounded_numbers("Revenue started at BRL 143.46 in September 2016.", prompt) == []
+
+
+def test_figures_merged_across_a_csv_comma_are_not_available():
+    # "01,143.46" is not a figure in the data, so 1,143.46 must still be flagged.
+    prompt = _monthly_prompt()
+    assert find_ungrounded_numbers("Revenue was BRL 1,143.46 that month.", prompt) == ["1,143.46"]
+
+
+def test_facts_keep_thousands_separators():
+    # FACTS write 1,153,364.20 with commas; the grouped reading still applies there.
+    prompt = _monthly_prompt()
+    assert find_ungrounded_numbers("The peak was BRL 1,153,364.20 (BRL 1.15 million).", prompt) == []
+
+
+def test_nearest_figure_hint_reads_csv_rows_plainly():
+    assert nearest_figure_hint("143.5", _monthly_prompt()) == "143.5 (nearest figure in the data: 143.46)"
+
+# --------------------------------------------- round milestones in the rewrite note
+
+
+def test_round_milestones_are_recognised():
+    assert all(is_round_milestone(t) for t in ["1.00 million", "90.0%", "900,000", "5 million", "BRL 1m"])
+    assert not any(is_round_milestone(t) for t in ["985,491.64", "85.9%", "5.7 million", "1.15 million", "0"])
+
+
+def test_rewrite_note_tells_the_model_to_delete_a_milestone():
+    note = ungrounded_note(["1.00 million"], _monthly_prompt())
+    assert note.startswith("used figures that are not in RESULT or FACTS")
+    assert '"1.00 million" is a round threshold you chose' in note and "Delete the words" in note
+    assert "nearest figure" not in note
+
+
+def test_rewrite_note_keeps_the_nearest_figure_for_a_near_miss():
+    note = ungrounded_note(["143.5", "1.00 million"], _monthly_prompt())
+    assert "143.5 (nearest figure in the data: 143.46)" in note and "round threshold" in note
+
+# --------------------------------------------- two-way tables reach the model whole
+
+
+def _grid_prompt():
+    rows = []
+    months = ["January", "February", "March", "April", "May", "June", "July", "August",
+              "September", "October", "November", "December"]
+    for k, month in enumerate(months, start=1):
+        for j in range(10):
+            rows.append({"order_month_num": k, "order_month": month, "category": f"category_{j}",
+                         "monthly_revenue": 1000.0 * k + 10.0 * j + 0.25})
+    df = pd.DataFrame(rows)
+    hint = "monthly_revenue (BRL) grouped by purchase month and product category"
+    profile = profile_result(df, "SELECT ...\nLIMIT 500", hint)
+    return build_explanation_prompt("How does revenue vary by month?", hint, [], df, profile)
+
+
+def test_grid_result_is_sent_whole():
+    prompt = _grid_prompt()
+    assert "RESULT (all 120 rows, as a grid of category by order_month, CSV):" in prompt
+    assert "category,January,February,March,April,May,June,July,August,September,October,November,December" in prompt
+
+
+def test_cell_beyond_the_first_50_rows_is_grounded():
+    # December, category_9 is row 120 of the long list, beyond the first 50 rows.
+    assert find_ungrounded_numbers("December peaked at BRL 12,090.25 for category 9.", _grid_prompt()) == []
