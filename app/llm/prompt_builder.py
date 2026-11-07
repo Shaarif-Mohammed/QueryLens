@@ -176,6 +176,15 @@ Respond with JSON matching the response schema:
 - cannot_answer_reason: empty unless status is cannot_answer
 - closest_alternative: empty unless status is cannot_answer; otherwise ONE plain-English
   question the data can answer, never SQL
+- follow_up_questions: when status is ok, exactly two short questions (under 15 words
+  each) a marketplace manager would naturally ask next about this result. Each must be
+  answered directly by ONE of the views above: no raw tables, and no threshold you would
+  have to invent (such as "high-value orders"). Write them in plain business English
+  with no column or view names, spell "instalment" as the views do, and do not repeat
+  the question. One goes deeper (a breakdown or a
+  driver of this result); the other goes sideways (a related measure such as delivery,
+  reviews or payments). Never suggest questions about individual customers. Empty list
+  when status is cannot_answer.
 """
 
 

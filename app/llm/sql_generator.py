@@ -62,6 +62,10 @@ class SqlResponse(BaseModel):
     assumptions: list[str] = Field(description="Interpretation choices, defaults applied and caveats.")
     cannot_answer_reason: str = Field(description="Empty unless status is cannot_answer.")
     closest_alternative: str = Field(description="Empty unless status is cannot_answer.")
+    follow_up_questions: list[str] = Field(
+        default_factory=list,
+        description="Two short next questions this data can answer; empty if cannot_answer.",
+    )
 
 
 @dataclass
@@ -143,8 +147,33 @@ class SqlGenerator:
             result.error = "Model response was not valid JSON for the expected schema."
             return result
         parsed.sql = clean_sql(parsed.sql)
+        parsed.follow_up_questions = (
+            clean_follow_ups(parsed.follow_up_questions, question) if parsed.status == "ok" else []
+        )
         result.response = parsed
         return result
+
+
+MAX_FOLLOW_UPS = 2
+MAX_FOLLOW_UP_CHARS = 120
+
+
+def clean_follow_ups(questions: list[str] | None, asked: str) -> list[str]:
+    """At most two distinct, short questions, none repeating the one just asked."""
+    def key(text: str) -> str:
+        return re.sub(r"\s+", " ", text.strip().lower()).rstrip(" ?.!")
+
+    kept: list[str] = []
+    seen = {key(asked)}
+    for q in questions or []:
+        q = re.sub(r"\s+", " ", str(q)).strip()
+        if not q or len(q) > MAX_FOLLOW_UP_CHARS or key(q) in seen:
+            continue
+        seen.add(key(q))
+        kept.append(q if q.endswith("?") else q.rstrip(".!") + "?")
+        if len(kept) == MAX_FOLLOW_UPS:
+            break
+    return kept
 
 
 @dataclass
