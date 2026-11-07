@@ -19,6 +19,7 @@ ROOT = next(p for p in Path(__file__).resolve().parents if (p / "metadata").is_d
 sys.path.insert(0, str(ROOT))
 
 import app.llm.sql_generator as sg  # noqa: E402
+from app.llm.sql_generator import SqlResponse, clean_follow_ups  # noqa: E402
 
 MAIN, BACKUP = "main-model", "backup-model"
 
@@ -169,4 +170,34 @@ def test_follow_up_includes_previous_question():
 
     prompt = build_user_prompt("How is delivery there?", {"question": "Top states?", "sql": "SELECT 1"})
     assert "PREVIOUS QUESTION" in prompt and "Top states?" in prompt and prompt.endswith("How is delivery there?")
+
+# ------------------------------------------------- follow-up suggestions written by the SQL step
+
+
+def test_follow_ups_default_to_empty_when_the_model_leaves_them_out():
+    response = SqlResponse.model_validate_json(
+        '{"status": "ok", "sql": "SELECT 1", "sources": [], "measure_used": "x", '
+        '"assumptions": [], "cannot_answer_reason": "", "closest_alternative": ""}'
+    )
+    assert response.follow_up_questions == []
+
+
+def test_follow_ups_are_capped_deduplicated_and_never_repeat_the_question():
+    asked = "Which states have the most revenue?"
+    out = clean_follow_ups(
+        [
+            "which states have the most revenue",
+            "How is delivery in these states?",
+            "How is delivery in these states",
+            "  What share of orders   come from SP. ",
+            "Which categories sell best in SP?",
+        ],
+        asked,
+    )
+    assert out == ["How is delivery in these states?", "What share of orders come from SP?"]
+
+
+def test_overlong_or_blank_follow_ups_are_dropped():
+    assert clean_follow_ups(["", "   ", "x" * 200], "Q?") == []
+    assert clean_follow_ups(None, "Q?") == []
 

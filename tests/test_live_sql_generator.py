@@ -2,7 +2,7 @@
 QueryLens — AI-Powered Marketplace Analytics Copilot
 Tests: SQL generator against the live model
 
-These call Gemini for real (about 11 requests), so they are skipped
+These call Gemini for real (about 13 requests, roughly USD 0.11), so they are skipped
 unless QUERYLENS_LIVE_LLM_TESTS=1:
 
     QUERYLENS_LIVE_LLM_TESTS=1 python -m pytest tests/test_live_sql_generator.py -v
@@ -60,6 +60,25 @@ def test_top_customers(generator):
     assert "order by total_spend desc" in sql and "limit" in sql
     assert "segment" not in sql, "segment column returned for a non-segment question"
     assert_valid(x.sql)
+
+
+def test_answers_come_with_two_plain_follow_ups(generator):
+    question = "Which product categories bring in the most revenue?"
+    x = answer(generator, question)
+    assert x.status == "ok"
+    assert len(x.follow_up_questions) == 2, x.follow_up_questions
+    for q in x.follow_up_questions:
+        assert q.endswith("?") and len(q.split()) <= 20, q
+        assert not re.search(r"\bvw_|_id\b|select ", q.lower()), f"follow-up names a column, view or SQL: {q}"
+        assert norm(q) != norm(question)
+
+
+def test_follow_ups_stay_within_one_view(generator):
+    x = answer(generator, "Do customers who pay in instalments spend more per order?")
+    assert x.status == "ok" and len(x.follow_up_questions) == 2, x.follow_up_questions
+    for q in x.follow_up_questions:
+        assert "installment" not in q.lower(), f"spelling should follow the views: {q}"
+        assert "high-value" not in q.lower(), f"invented threshold: {q}"
 
 
 def test_churn_rate(generator):
@@ -124,6 +143,7 @@ def test_unavailable_data_is_refused(generator):
     x = answer(generator, "What is our profit margin by product category?")
     assert x.status == "cannot_answer" and x.sql == ""
     assert x.closest_alternative and "select" not in x.closest_alternative.lower()
+    assert x.follow_up_questions == [], "a refusal offers its closest alternative, not follow-ups"
 
 
 def test_prompt_injection_is_refused(generator):
