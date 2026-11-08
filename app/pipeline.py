@@ -49,18 +49,41 @@ Status = Literal[
     "execution_failed",   # the database timed out, was unreachable or refused the query
 ]
 
-MESSAGES = {
-    "empty_question": "Please type a question.",
-    "long_question": f"Please keep the question under {MAX_QUESTION_CHARS:,} characters.",
-    "generation_failed": "QueryLens could not reach its language model just now. Please try again in a moment.",
-    "rejected": "The generated query did not pass the safety checks, so it was not run.",
-    "not_validated": "The generated query did not pass the safety checks, so it was not run.",
-    "timeout": "The query took too long and was stopped. Try narrowing the question.",
-    "connection": "QueryLens could not reach the warehouse just now. Please try again in a moment.",
-    "database": "The warehouse could not run the generated query.",
-    "cannot_answer": "This question is outside what the marketplace data covers.",
-    "explanation_failed": "The written explanation could not be produced just now; the table shows the answer.",
+# Interface wording: always offer a next step, never blame the user, stay honest.
+# Each stop has a short title (no closing punctuation) and a plain next-step line; the
+# interface shows them as a message box, and `message` joins them for logs and scripts.
+NEXT_STEP = "You can keep exploring the quick insights below."
+MESSAGE_PARTS: dict[str, tuple[str, str]] = {
+    "empty_question": ("Type a question to get started", "Or pick one of the quick insights below."),
+    "long_question": (
+        "That question is a bit long",
+        f"Questions under {MAX_QUESTION_CHARS:,} characters work best; try trimming it to the core of what you want to know.",
+    ),
+    "generation_failed": ("QueryLens couldn't reach its language model just now", f"Please try again in a moment. {NEXT_STEP}"),
+    "rejected": (
+        "This query was held back",
+        "QueryLens wrote a query for this, but it didn't pass the safety checks, so it wasn't run. "
+        "Rephrasing the question usually helps.",
+    ),
+    "not_validated": (
+        "This query was held back",
+        "QueryLens wrote a query for this, but it didn't pass the safety checks, so it wasn't run. "
+        "Rephrasing the question usually helps.",
+    ),
+    "timeout": (
+        "This one took too long to run",
+        "QueryLens stopped it. Narrowing it down usually helps, for example to fewer months or a single category.",
+    ),
+    "connection": ("QueryLens couldn't reach the warehouse just now", f"Please try again in a moment. {NEXT_STEP}"),
+    "database": ("The warehouse couldn't run this query", "Rephrasing the question often helps."),
+    "cannot_answer": ("This one isn't in the dataset", "This question is outside what the marketplace data covers."),
 }
+MESSAGES = {key: f"{title}. {body}" for key, (title, body) in MESSAGE_PARTS.items()}
+# Inline notes shown with an answer rather than in place of one.
+MESSAGES["explanation_failed"] = "The written summary isn't available this time, but the table and chart show the full answer."
+MESSAGES["explanation_flagged"] = (
+    "A few figures in this summary couldn't be matched exactly to the result, so rely on the table for exact numbers."
+)
 
 
 @dataclass
@@ -68,6 +91,7 @@ class PipelineResult:
     question: str
     status: Status
     message: str = ""  # one plain-English line for the interface; empty when answered
+    message_key: str = ""  # which MESSAGE_PARTS entry `message` came from (empty for a model's refusal reason)
     generation: GenerationResult | None = None
     validation: ValidationResult | None = None
     execution: ExecutionResult | None = None
@@ -131,54 +155,62 @@ def answer_question(
     *,
     generator=None,
     execute: Callable[[ValidationResult], ExecutionResult] = execute_validated,
+    on_step: Callable[[str], None] | None = None,
 ) -> PipelineResult:
     """Run one question through generation, validation and execution.
 
     `previous` is the follow_up_context() of the last answered question, if any.
-    `generator` and `execute` are replaceable for tests."""
+    `generator` and `execute` are replaceable for tests. `on_step` is called with
+    "generation", "validation" and "execution" as each step starts, so the interface
+    can show real progress; a failing callback never stops the question."""
     question = (question or "").strip()
     result = PipelineResult(question=question, status="answered")
 
     if not question:
-        return _stop(result, "invalid_question", MESSAGES["empty_question"])
+        return _stop(result, "invalid_question", MESSAGES["empty_question"], key="empty_question")
     if len(question) > MAX_QUESTION_CHARS:
-        return _stop(result, "invalid_question", MESSAGES["long_question"])
+        return _stop(result, "invalid_question", MESSAGES["long_question"], key="long_question")
 
     # 1. Generate SQL.
+    _notify(on_step, "generation")
     started = time.monotonic()
     try:
         generation = (generator or get_generator()).generate(question, previous)
     except Exception as exc:  # noqa: BLE001 — any failure here must stop cleanly
         logger.exception("SQL generation raised")
         result.timings["generation"] = time.monotonic() - started
-        return _stop(result, "generation_failed", MESSAGES["generation_failed"], detail=str(exc))
+        return _stop(result, "generation_failed", MESSAGES["generation_failed"], detail=str(exc),
+                     key="generation_failed")
     result.generation = generation
     result.timings["generation"] = time.monotonic() - started
 
     if not generation.ok:
-        return _stop(result, "generation_failed", MESSAGES["generation_failed"], detail=generation.error)
+        return _stop(result, "generation_failed", MESSAGES["generation_failed"], detail=generation.error,
+                     key="generation_failed")
 
     response = generation.response
     if response.status == "cannot_answer":
         # A refusal never reaches the validator, even if the model also wrote SQL.
-        reason = response.cannot_answer_reason or MESSAGES["cannot_answer"]
-        return _stop(result, "cannot_answer", reason)
+        reason = response.cannot_answer_reason or MESSAGE_PARTS["cannot_answer"][1]
+        return _stop(result, "cannot_answer", reason, key="cannot_answer")
 
     # 2. Validate.
+    _notify(on_step, "validation")
     started = time.monotonic()
     validation = validate_sql(response.sql)
     result.validation = validation
     result.timings["validation"] = time.monotonic() - started
     if not validation.ok:
-        return _stop(result, "rejected", MESSAGES["rejected"], detail="; ".join(validation.errors))
+        return _stop(result, "rejected", MESSAGES["rejected"], detail="; ".join(validation.errors), key="rejected")
 
     # 3. Execute. Only the validated SQL is passed on, never the generated text.
+    _notify(on_step, "execution")
     execution = execute(validation)
     result.execution = execution
     result.timings["execution"] = execution.elapsed_seconds
     if not execution.ok:
-        key = execution.error_kind if execution.error_kind in MESSAGES else "database"
-        return _stop(result, "execution_failed", MESSAGES[key], detail=execution.error)
+        key = execution.error_kind if execution.error_kind in MESSAGE_PARTS else "database"
+        return _stop(result, "execution_failed", MESSAGES[key], detail=execution.error, key=key)
 
     result.profile = profile_result(
         execution.dataframe, execution.sql, response.measure_used, execution.truncated
@@ -220,9 +252,20 @@ def explain_answer(result: PipelineResult, *, explainer=None) -> PipelineResult:
     return result
 
 
-def _stop(result: PipelineResult, status: Status, message: str, detail: str | None = None) -> PipelineResult:
+def _notify(on_step: Callable[[str], None] | None, step: str) -> None:
+    if on_step is None:
+        return
+    try:
+        on_step(step)
+    except Exception:  # noqa: BLE001 — a display problem must never stop the question
+        logger.exception("on_step callback raised for step %s", step)
+
+
+def _stop(result: PipelineResult, status: Status, message: str, detail: str | None = None,
+          key: str = "") -> PipelineResult:
     result.status = status
     result.message = message
+    result.message_key = key
     if detail:
         logger.warning("%s: %s | question: %s", status, detail, result.question[:80])
     return result

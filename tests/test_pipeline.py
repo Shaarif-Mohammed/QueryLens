@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from app.database.query_executor import ExecutionResult
-from app.pipeline import MAX_QUESTION_CHARS, answer_question, explain_answer
+from app.pipeline import MAX_QUESTION_CHARS, MESSAGE_PARTS, answer_question, explain_answer
 from app.validation.sql_validator import ValidationResult
 
 GOOD_SQL = "SELECT segment, COUNT(*) AS customers FROM warehouse.vw_rfm GROUP BY segment ORDER BY segment"
@@ -204,3 +204,42 @@ def test_no_explanation_for_unanswered_questions():
     explain_answer(result, explainer=explainer)
     assert explainer.calls == [] and result.explanation is None
 
+
+# ------------------------------------------------------------ progress and message parts
+
+
+def test_steps_are_reported_in_order():
+    steps = []
+    generator, executor = FakeGenerator(), FakeExecutor()
+    answer_question("How many customers are in each RFM segment?", generator=generator, execute=executor,
+                    on_step=steps.append)
+    assert steps == ["generation", "validation", "execution"]
+
+
+def test_steps_stop_where_the_question_stops():
+    steps = []
+    response = FakeResponse(status="cannot_answer", sql="", cannot_answer_reason="No returns data.")
+    answer_question("Which products get returned most?", generator=FakeGenerator(FakeGeneration(response)),
+                    execute=FakeExecutor(), on_step=steps.append)
+    assert steps == ["generation"]
+
+
+def test_a_failing_progress_callback_never_stops_the_question():
+    def broken(step):
+        raise RuntimeError("display failed")
+    result = answer_question("How many customers are in each RFM segment?", generator=FakeGenerator(),
+                             execute=FakeExecutor(), on_step=broken)
+    assert result.status == "answered"
+
+
+def test_every_stop_names_its_message():
+    failed = ExecutionResult(False, None, sql=GOOD_SQL, error="stopped", error_kind="timeout")
+    result, _, _ = ask(execution=failed)
+    assert result.message_key == "timeout" and result.message.startswith(MESSAGE_PARTS["timeout"][0])
+    refusal = FakeResponse(status="cannot_answer", sql="", cannot_answer_reason="No returns data.")
+    result, _, _ = ask(generation=FakeGeneration(refusal))
+    assert result.message_key == "cannot_answer" and result.message == "No returns data."
+    result, _, _ = ask("")
+    assert result.message_key == "empty_question"
+    result, _, _ = ask()
+    assert result.message_key == ""
