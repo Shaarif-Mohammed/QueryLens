@@ -1,0 +1,28 @@
+# QueryLens — AI-Powered Marketplace Analytics Copilot
+# Streamlit configuration: the Midnight ink theme. Page effects (glow, glass, pills,
+# animations) are layered on top in app/ui/styles.py.
+
+[theme]
+base = "dark"
+primaryColor = "#5B8CFF"
+backgroundColor = "#0A0E18"
+secondaryBackgroundColor = "#121A2B"
+textColor = "#E8ECF5"
+linkColor = "#A9C3FF"
+linkUnderline = false
+borderColor = "#1F2A40"
+showWidgetBorder = true
+baseRadius = "12px"
+buttonRadius = "full"
+font = "'Plus Jakarta Sans':https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap, sans-serif"
+headingFont = "'Plus Jakarta Sans':https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap, sans-serif"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap, monospace"
+codeBackgroundColor = "#0E1424"
+dataframeBorderColor = "#1F2A40"
+dataframeHeaderBackgroundColor = "#121A2B"
+dataframeHeaderTextColor = "#8A96B0"
+chartCategoricalColors = ["#5B8CFF", "#A9C3FF", "#2F4F9E"]
+chartSequentialColors = ["#121A2B", "#16213A", "#1B2A4D", "#223666", "#2F4F9E", "#3F66C4", "#5B8CFF", "#7FA4FF", "#A9C3FF", "#D4E1FF"]
+
+[client]
+toolbarMode = "minimal"
