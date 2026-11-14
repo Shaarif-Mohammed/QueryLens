@@ -68,6 +68,8 @@ def show(result, number: int, save_charts: bool) -> None:
                 print(f"Measure: {r.measure_used}")
                 for a in r.assumptions:
                     print(f"  note: {a}")
+                for q in getattr(r, "follow_up_questions", None) or []:
+                    print(f"  follow-up: {q}")
     _show_data_steps(result.validation, result.execution, result.profile)
     _show_chart(result.dataframe, result.profile, result.question, number, save_charts)
     _show_explanation(result.explanation)
@@ -117,7 +119,8 @@ def _show_explanation(explanation) -> None:
         return
     print(f"Explanation step: {explanation.model} | attempts {explanation.attempts} | "
           f"{explanation.latency_seconds:.1f}s"
-          + (f" | thinking tokens {explanation.thinking_tokens}" if explanation.thinking_tokens else ""))
+          + (f" | thinking tokens {explanation.thinking_tokens}" if explanation.thinking_tokens else "")
+          + (f" | retries: {explanation.retry_log}" if explanation.retry_log else ""))
     if not explanation.ok:
         print(f"Explanation error: {explanation.error}")
         return
