@@ -125,7 +125,7 @@ metrics:
     definition: "Default meaning: customers whose customer_status is 'Lost' (no delivered order since before 2017-09-01, i.e. over 12 months before the reference date). Churn RATE = Lost customers divided by all customers in vw_customer_health, times 100. For cohort questions ('how many customers dropped off after month N'), use churned_from_prev_period in vw_retention."
     source_columns: [vw_customer_health.customer_status, vw_retention.churned_from_prev_period]
     notes:
-      - "Always add one line to a churn-rate answer: most customers in this marketplace buy only once, so a high churn rate is normal here and does not signal a problem by itself."
+      - "Only when the answer reports a churn RATE (not for customer status counts or other questions), add one line: most customers in this marketplace buy only once, so a high churn rate is normal here and does not signal a problem by itself."
       - "If the user means 'stopped buying recently', mention that Dormant customers (6 to 12 months silent) are not counted as churned."
 
   retention_rate:
@@ -297,7 +297,7 @@ consistency_rules:
 
   small_samples_and_data_edges:
     - "Rankings and comparisons built on very few orders are unreliable. Follow min_volume_for_rankings, and flag any result based on fewer than about 30 orders or reviews as a small sample."
-    - "The last cohorts and late-2018 months are incomplete (data ends Aug 2018), and late 2016 is nearly empty: flag any trend or retention figure that depends on those cohorts or months instead of presenting it as a real change."
+    - "Retention and repeat figures for the most recent cohorts (mid-2018) are understated because those customers have had less time to return, and late 2016 is nearly empty: flag any trend or retention figure that depends on those cohorts or months instead of presenting it as a real change. Monthly revenue and orders for 2018, August included, are complete: do not describe those months as incomplete."
     - "Retention and repeat-purchase rates are low in this marketplace. Do not describe them as a data error."
 
   deterministic_output:
@@ -317,6 +317,7 @@ ranking_defaults:
   top_categories_and_products: "Highest total_revenue. 'Most popular' = most orders (total_orders)."
   best_rated: "Highest avg_review_score, restricted by min_volume_for_rankings."
   worst_or_problem: "The reverse ordering of the same measure. For sellers 'problem sellers' = performance_tier 'Needs Work', plus the ml_seller_outliers table for high-revenue, low-quality sellers."
+  above_or_below_average: "'Above average' or 'below average' for a score or rate across groups (categories, states, sellers) = compared with the overall average weighted by volume, e.g. SUM(avg_review_score * total_reviews) / SUM(total_reviews), over the rows that pass min_volume_for_rankings. Say which average was used."
   high_threshold: "When a question filters on 'high', 'large' or 'top' revenue or volume without giving a number (e.g. 'high revenue but poor delivery'), use the top quarter: revenue_percentile >= 75 in vw_seller_performance, or the top 25% of the measure elsewhere. State the threshold and name the median (>= 50) as the looser alternative. 'Poor' or 'low' on a rate means ranking by that rate ascending, within min_volume_for_rankings."
 
 not_available_in_the_data:
