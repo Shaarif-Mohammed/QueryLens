@@ -36,8 +36,14 @@ DEFAULT_FALLBACK_MODELS = "gemini-3.8-flash"
 RETRYABLE_STATUS_CODES = {429, 500, 503, 504}
 # Model retired or unknown: skip straight to the next model.
 SKIP_MODEL_STATUS_CODES = {404}
-# Rate limited (429): a quota or rate limit was reached. A retry seconds later rarely
-# succeeds and may use up more quota, so move to the next model at once.
+# Rate limited (429). What it means depends on the backend:
+# - Gemini Developer API key: a per-minute or per-day quota is used up; a retry
+#   seconds later cannot succeed and may use up more quota, so move to the next
+#   model at once.
+# - Vertex AI pay-as-you-go: the model's shared capacity was busy for a moment, and
+#   Google recommends retrying after a short wait. The main model usually answers on a
+#   retry, and the backup is slower and more likely to stall, so the main model is
+#   retried with longer waits first (see call_with_fallback).
 QUOTA_STATUS_CODES = {429}
 # Request ran past its deadline (server 504 or client timeout). The same model is
 # likely to stall again, so hand the question to the next model at once; only the
@@ -187,10 +193,17 @@ class ModelCall:
     error: str | None = None
 
 
-def call_with_fallback(client, models: list[str], contents: str, config) -> ModelCall:
+def call_with_fallback(client, models: list[str], contents: str, config,
+                       retry_rate_limits: bool | None = None) -> ModelCall:
     """Send one request, retrying and moving to backup models as the error requires.
     Shared by every model call in QueryLens, so all calls fail and recover the same way.
-    Errors that are neither API errors nor network errors are re-raised."""
+    Errors that are neither API errors nor network errors are re-raised.
+
+    `retry_rate_limits`: retry a 429 on the same model (Vertex AI, where it means busy
+    for a moment) instead of moving on at once (API key, where it means a used-up
+    quota). Defaults to whichever backend .env selects."""
+    if retry_rate_limits is None:
+        retry_rate_limits = using_vertex_ai()
     retry_log: list[str] = []
     total_attempts = 0
     last_error = "No model was tried."
@@ -215,15 +228,19 @@ def call_with_fallback(client, models: list[str], contents: str, config) -> Mode
                 if code != "timeout/network" and code not in RETRYABLE_STATUS_CODES:
                     # Bad request, bad key, permission: another model will not help.
                     return ModelCall(None, model, total_attempts, retry_log, last_error)
-                if code in QUOTA_STATUS_CODES:
+                if code in QUOTA_STATUS_CODES and not retry_rate_limits:
                     retry_log.append(f"{model} attempt {attempt}: {code} quota/rate limit, moving to next model")
                     break
                 if code in STALL_CODES and model != models[-1]:
                     retry_log.append(f"{model} attempt {attempt}: {code} (stalled), moving to next model")
                     break
                 if attempt < ATTEMPTS_PER_MODEL:
-                    delay = _backoff_delay(attempt)
-                    retry_log.append(f"{model} attempt {attempt}: {code}, retrying in {delay:.1f}s")
+                    # A busy (429) model gets longer waits (about 2-4 s, then 4-8 s):
+                    # Google advises against retrying shared capacity immediately.
+                    busy = code in QUOTA_STATUS_CODES
+                    delay = _backoff_delay(attempt + 1 if busy else attempt)
+                    reason = f"{code} busy" if busy else f"{code}"
+                    retry_log.append(f"{model} attempt {attempt}: {reason}, retrying in {delay:.1f}s")
                     time.sleep(delay)
                     continue
                 retry_log.append(f"{model} attempt {attempt}: {code}, moving to next model")
