@@ -119,10 +119,40 @@ def test_503_three_times_moves_to_backup(make_generator):
 
 @pytest.mark.parametrize("code", [429, 504])
 def test_quota_and_stall_skip_straight_to_backup(make_generator, code):
+    """API-key backend (the fixture's): a 429 is a used-up quota."""
     gen = make_generator({MAIN: [api_error(code)], BACKUP: [FakeResponse()]})
     r = gen.generate("q")
     assert r.ok and r.model == BACKUP
     assert gen.calls == [MAIN, BACKUP]
+
+
+# On Vertex AI a 429 means the shared capacity was busy for a moment: the main model is
+# retried with longer waits before the slower backup is tried.
+def test_busy_429_on_vertex_retries_the_main_model(make_generator, monkeypatch):
+    gen = make_generator({MAIN: [api_error(429), FakeResponse()], BACKUP: [FakeResponse()]})
+    monkeypatch.setattr(sg, "using_vertex_ai", lambda: True)
+    r = gen.generate("q")
+    assert r.ok and r.model == MAIN and gen.calls == [MAIN, MAIN]
+    assert "429 busy, retrying" in r.retry_log[0]
+
+
+def test_busy_429_every_time_on_vertex_moves_to_backup(make_generator, monkeypatch):
+    gen = make_generator({MAIN: [api_error(429)], BACKUP: [FakeResponse()]})
+    monkeypatch.setattr(sg, "using_vertex_ai", lambda: True)
+    r = gen.generate("q")
+    assert r.ok and r.model == BACKUP
+    assert gen.calls == [MAIN] * sg.ATTEMPTS_PER_MODEL + [BACKUP]
+
+
+def test_busy_429_waits_longer_than_a_503(make_generator, monkeypatch):
+    waits = []
+    gen = make_generator({MAIN: [api_error(429)], BACKUP: [api_error(503)]})
+    monkeypatch.setattr(sg, "using_vertex_ai", lambda: True)
+    monkeypatch.setattr(sg.time, "sleep", waits.append)
+    gen.generate("q")
+    busy, unavailable = waits[:2], waits[2:]
+    assert 2 <= busy[0] <= 4 and 4 <= busy[1] <= 8      # 429 on the main model
+    assert 1 <= unavailable[0] <= 2                     # first 503 retry on the backup
 
 
 def test_client_timeout_skips_straight_to_backup(make_generator):
@@ -171,6 +201,7 @@ def test_follow_up_includes_previous_question():
     prompt = build_user_prompt("How is delivery there?", {"question": "Top states?", "sql": "SELECT 1"})
     assert "PREVIOUS QUESTION" in prompt and "Top states?" in prompt and prompt.endswith("How is delivery there?")
 
+
 # ------------------------------------------------- follow-up suggestions written by the SQL step
 
 
@@ -200,4 +231,3 @@ def test_follow_ups_are_capped_deduplicated_and_never_repeat_the_question():
 def test_overlong_or_blank_follow_ups_are_dropped():
     assert clean_follow_ups(["", "   ", "x" * 200], "Q?") == []
     assert clean_follow_ups(None, "Q?") == []
-
