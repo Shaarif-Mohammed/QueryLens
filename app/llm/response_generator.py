@@ -50,7 +50,8 @@ NUMBERS
 2. Money is in BRL. Columns ending in _pct or _rate are percentages on a 0-100 scale.
    When rounding, round to the NEAREST value and keep at least three significant
    figures: BRL 5,769,703.15 -> BRL 5.77 million; 88,644 orders -> about 88,600
-   orders; BRL 985,491.64 -> BRL 985,492 or BRL 985k. Keep percentages to one decimal.
+   orders; BRL 985,491.64 -> BRL 985,492 or BRL 985k. Keep percentages to one decimal,
+   or two when the value is under 1% (0.43%, not 0.4%), so small rates stay distinct.
    Never turn a figure into a bound or a threshold ("over 5.7 million",
    "more than 88,000", "under 900,000"): quote the figure itself.
 
@@ -62,9 +63,16 @@ CONTENT
    clear gap between groups. Use plain business words, not column names or SQL terms.
    Identifiers such as seller or customer IDs are shown shortened; refer to them as
    they appear.
+   Describe the size of a change as the figures show it. Do not write "slightly",
+   "steadily", "gradually", "stable" or "flat" unless the figures bear it out: a fall
+   from 1.15 million to 843,078 is not "slight", and a rise with dips is not "steady"
+   (say it rose with dips, and name the dips). When RESULT shows fewer rows than the
+   result has, describe only the rows shown ("among the 50 shown"), never all of them.
 5. Describe what the data shows, not why. Do not speculate about causes. For a question
    about whether one thing affects another, say the result shows an association, not
-   proof of cause. Do not use "significant" or "significantly": no statistical test was
+   proof of cause. If the question asks why, describe what RESULT shows alongside it
+   (fewer orders, lower order value, a different customer mix) and say that the data
+   does not record the reasons. Do not use "significant" or "significantly": no statistical test was
    run. Say "much lower", "a clear gap" or similar instead.
 6. If the result has no rows, say that nothing matched and stop; do not guess why.
    If FACTS say the rows are a subset (top N), do not describe their totals or shares
@@ -76,13 +84,18 @@ CAVEATS
    - Keep a small-sample caveat only if FACTS report rows under the threshold; if FACTS
      say every row is above it, drop that caveat.
    - Drop any note that states something about the result that FACTS or RESULT
-     contradict (e.g. "high volumes" when volumes are small).
+     contradict (e.g. "high volumes" when volumes are small, "a high share of Lost
+     customers" when Lost is the smallest group, "recent months are low" when they are
+     the highest).
+   - Drop any note about rows, months or measures that are not in RESULT, or that the
+     answer does not discuss (e.g. a note about August on an answer about February).
    - Keep a note about thin late-2016 data only if RESULT is a series over time whose
      dates include 2016; otherwise drop it.
    - Keep notes that do not depend on the data: thresholds chosen and their
      alternatives, association not cause, snapshot tables, RFM labels such as Loyal
-     not necessarily meaning repeat purchases, recent cohorts having had less time to
-     return.
+     not necessarily meaning repeat purchases. Keep "recent cohorts have had less time
+     to return" only for cohort or retention results, and "a high churn rate is normal
+     here" only for a churn rate.
 8. caveats: the notes that survive, each one short plain-English sentence, most
    important first. At most 4. An empty list is fine. A caveat is a limit on how to
    read the result. Do not repeat definitions already given in the explanation (what
@@ -287,15 +300,30 @@ IGNORE_WHOLE_NUMBERS_UP_TO = 12
 MAX_ROUNDING_SHARE = 0.005
 
 
+# A figure written after one of these words is a bound ("exceeded BRL 1 million",
+# "over 90%"). A bound is grounded only if it is (almost exactly) a figure from the data:
+# otherwise "BRL 1 million" would pass as a rounding of anything from 0.5 to 1.5 million.
+BOUND_BEFORE = re.compile(
+    r"\b(?:over|above|under|below|exceed(?:s|ed|ing)?|more than|less than|fewer than|at least|at most|"
+    r"upwards of|surpass(?:es|ed|ing)?|top(?:s|ped|ping))\s+(?:about\s+|roughly\s+)?(?:BRL\s*|R\$\s*)?$",
+    re.IGNORECASE,
+)
+
+
 def find_ungrounded_numbers(written: str, source: str) -> list[str]:
     """Numbers in `written` that match no number in `source`, allowing for honest
     rounding: to the decimals written (22.6 for 22.61), to a unit (985k, 5.77 million),
-    or to trailing zeros within 0.5% (88,600 for 88,644 — but not 900,000 for 861,473)."""
+    or to trailing zeros within 0.5% (88,600 for 88,644 — but not 900,000 for 861,473).
+    A figure written as a bound ("exceeded BRL 1 million") must be within 0.5% of a
+    figure in the data."""
     available = _available_figures(source)
     ungrounded = []
-    for value, text, tolerance, plain_whole in _numbers(written):
+    written = written or ""
+    for value, text, tolerance, plain_whole, start in _numbers(written, with_position=True):
         if plain_whole and value <= IGNORE_WHOLE_NUMBERS_UP_TO:
             continue
+        if BOUND_BEFORE.search(written[max(0, start - 40):start]):
+            tolerance = min(tolerance, MAX_ROUNDING_SHARE * abs(value) + 1e-9)
         if not any(abs(value - a) <= tolerance for a in available):
             ungrounded.append(text.strip())
     return list(dict.fromkeys(ungrounded))
@@ -319,9 +347,9 @@ def _available_figures(source: str) -> list[float]:
     return figures
 
 
-def _numbers(text: str):
+def _numbers(text: str, with_position: bool = False):
     """(value, text as written, how far honest rounding could have moved it,
-    whether it is a plain whole number with no unit)."""
+    whether it is a plain whole number with no unit[, where it starts in `text`])."""
     for m in NUMBER.finditer(text or ""):
         whole, frac, unit = m.group(1), m.group(2) or "", (m.group(3) or "").lower()
         scale = SCALE.get(unit, 1)
@@ -332,4 +360,5 @@ def _numbers(text: str):
         zeros = len(digits) - len(digits.rstrip("0")) if not frac and scale == 1 and digits != "0" else 0
         if zeros:
             tolerance = max(tolerance, min(0.5 * 10 ** zeros, MAX_ROUNDING_SHARE * value))
-        yield value, m.group(0), tolerance + 1e-9, not frac and not unit
+        found = (value, m.group(0), tolerance + 1e-9, not frac and not unit)
+        yield found + (m.start(),) if with_position else found

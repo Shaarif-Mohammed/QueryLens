@@ -159,6 +159,29 @@ def test_bounds_from_the_live_run_are_flagged(written, source, flagged):
     assert find_ungrounded_numbers(written, source) == flagged
 
 
+@pytest.mark.parametrize("written, flagged", [
+    ("Five categories exceeded BRL 1 million in sales.", ["1 million"]),   # a bound, not a rounding
+    ("Revenue topped BRL 1.0 million in May.", ["1.0 million"]),
+    ("Three months had more than 1,120,000 in revenue.", ["1,120,000"]),
+])
+def test_bounds_must_be_figures_from_the_data(written, flagged):
+    """'BRL 1 million' alone may round 1,032,723.77; written as a bound it is a threshold."""
+    source = "category,total_revenue\nhealth_beauty,1412089.53\ncomputers_accessories,1032723.77"
+    assert find_ungrounded_numbers(written, source) == flagged
+
+
+@pytest.mark.parametrize("written", [
+    "Health beauty earned BRL 1.41 million, over BRL 1.03 million for computers.",   # bound = real figure
+    "Every row has at least 30 reviews.",                                            # threshold from FACTS
+    "Computers earned about BRL 1.03 million.",
+])
+def test_bounds_that_are_real_figures_pass(written):
+    source = ("FACTS:\n- Every row has at least 30 total_reviews.\n"
+              "RESULT (2 of 2 rows shown, CSV):\ncategory,total_revenue\nhealth_beauty,1412089.53\n"
+              "computers_accessories,1032723.77")
+    assert find_ungrounded_numbers(written, source) == []
+
+
 def test_ungrounded_answer_is_rewritten_once():
     client = FakeClient(answer(explanation="Across more than 88,000 orders."), answer())
     result = explain(client)
