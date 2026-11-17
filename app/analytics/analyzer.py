@@ -29,6 +29,9 @@ SMALL_SAMPLE = 30
 SAMPLE_BASE_COLUMNS = {
     "delivered_orders", "total_reviews", "total_orders", "order_count", "orders",
     "review_count", "reviews",
+    # A retention rate rests on the customers who came back: 13 of 3,037 is 0.43%,
+    # and a few customers more or less move it visibly.
+    "retained_customers",
 }
 # Shares of a total are only listed for short, complete results.
 MAX_SHARE_ROWS = 30
@@ -39,8 +42,13 @@ PERCENT_NAME = re.compile(r"(_pct|_rate|_percent|percentage|_share|^share)$|^pct
 COUNT_NAME = re.compile(
     r"(^|_)(orders|reviews|customers|sellers|items|products|count|n)$|^(count|num|number)_", re.IGNORECASE
 )
-# Whole numbers that position a row rather than measure it: month or period numbers.
-KEY_NAME = re.compile(r"(_num|_number|_no|_idx|_index)$|^(month|year|week|quarter|period|day)(_|$)", re.IGNORECASE)
+# Whole numbers that position a row rather than measure it: month or period numbers,
+# years, and the number of a group the query made (quintile 1-5, band, bucket).
+KEY_NAME = re.compile(
+    r"(_num|_number|_no|_idx|_index)$|^(month|year|week|quarter|period|day)(_|$)"
+    r"|(^|_)(month|period|week|quarter|year|quintile|quartile|decile|bucket|band|group)$",
+    re.IGNORECASE,
+)
 # A grid (heatmap) needs two dimensions of at most this many values each.
 MAX_GRID_SIDE = 30
 # A pair of measures per entity is drawn as a scatter only from this many rows.
@@ -214,12 +222,18 @@ def _primary_measure(numeric, roles, hint, order_by, ranked: bool = True) -> str
     """The column the answer is about. In a top-N result the ranking column wins when the
     SQL step also named it as a measure; otherwise the first column it named; otherwise
     the ranking column; otherwise the first non-count number. Without a top-N LIMIT,
-    ORDER BY may only sort groups (bands, statuses), so the first named column wins."""
+    ORDER BY may only sort groups (bands, statuses), so the first named column wins.
+    A ranking column named only as the basis of the selection ("review scores for the
+    top 10 categories by total_revenue") is not the measure: the question was about the
+    review scores."""
     if not numeric:
         return None
     hint = hint or ""
     named_cols = _named_columns(numeric, hint)
-    if order_by in named_cols and ranked:
+    ranking_basis_only = order_by in named_cols and named_cols[0] != order_by and bool(
+        re.search(rf"\bby\s+(?:the\s+)?(?:highest\s+|lowest\s+)?{re.escape(order_by)}(?![A-Za-z0-9_])", hint, re.IGNORECASE)
+    )
+    if order_by in named_cols and ranked and not ranking_basis_only:
         return order_by
     if named_cols:
         return named_cols[0]
@@ -378,6 +392,18 @@ def _facts(df: pd.DataFrame, p: ResultProfile, limit: int | None, truncated: boo
             f"{column} is left blank for {where}: the period before it had almost no activity, "
             "so that growth figure is not meaningful. Do not mention or estimate it."
         )
+
+    if m and not p.volume_column and not p.grid and p.role(m) == "count" and n >= 2:
+        # The count is itself the measure (customers retained, sellers per state): rows
+        # resting on a handful of people are compared on very little.
+        counts = df[m].dropna()
+        small = int((counts < SMALL_SAMPLE).sum())
+        p.small_sample_rows = small
+        if small:
+            facts.append(
+                f"{small} of {n} rows have fewer than {SMALL_SAMPLE} {m} (smallest: {format_number(counts.min())}); "
+                f"differences between those rows rest on a handful of {m} and can change with a few."
+            )
 
     if p.volume_column:
         volumes = df[p.volume_column]

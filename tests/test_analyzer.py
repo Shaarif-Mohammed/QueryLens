@@ -235,3 +235,57 @@ def test_ordinary_growth_and_falls_are_kept():
                        "orders": [10, 5, 20]})
     assert growth_from_tiny_base(df) == {}
 
+
+# ------------------------------------------------- findings from the evaluation question set
+def test_ranking_basis_named_in_the_measure_text_is_not_the_measure():
+    """Follow-up 'How are their review scores?' keeps the previous top 10 by revenue; the
+    answer and the chart are about the review scores."""
+    df = pd.DataFrame({"category": ["health_beauty", "watches_gifts", "bed_bath_table"],
+                       "avg_review_score": [4.23, 4.12, 4.00], "total_reviews": [8601, 5454, 9177],
+                       "total_revenue": [1412089.53, 1264333.12, 1225209.26]})
+    sql = ("SELECT category, avg_review_score, total_reviews, total_revenue FROM warehouse.vw_product_customer_affinity "
+           "ORDER BY total_revenue DESC, category ASC LIMIT 10")
+    hint = "avg_review_score and total_reviews for the top 10 categories by total_revenue from vw_product_customer_affinity"
+    p = profile_result(df, sql, hint)
+    assert p.primary_measure == "avg_review_score" and p.volume_column == "total_reviews"
+
+
+def test_ranking_column_still_wins_when_it_is_named_as_the_measure():
+    p = profile_result(sellers(), SELLER_SQL, "on_time_rate ranked lowest first, with total_revenue, from vw_seller_performance")
+    assert p.primary_measure == "on_time_rate"
+
+
+def test_small_counts_are_flagged_when_the_count_is_the_measure():
+    """Cohorts that kept the most customers: 11-20 people each out of thousands."""
+    df = pd.DataFrame({"cohort_month": pd.to_datetime(["2018-01-01", "2018-03-01", "2017-08-01"]),
+                       "cohort_size": [6842, 6774, 4057], "retained_customers": [20, 20, 11],
+                       "retention_rate_pct": [0.29, 0.30, 0.27]})
+    sql = "SELECT ... ORDER BY retained_customers DESC, cohort_month ASC LIMIT 10"
+    p = profile_result(df, sql, "retained_customers (customers active in period 3) from vw_retention")
+    assert p.primary_measure == "retained_customers" and p.small_sample_rows == 3
+    assert any("3 of 3 rows have fewer than 30 retained_customers" in f for f in p.facts)
+
+
+def test_large_counts_and_single_rows_get_no_small_count_fact():
+    big = pd.DataFrame({"customer_status": ["Active", "Lost"], "customer_count": [38487, 21111]})
+    assert not any("fewer than 30" in f for f in profile_result(big, "", "customer_count").facts)
+    one = pd.DataFrame({"sellers": [1]})
+    assert not any("fewer than 30" in f for f in profile_result(one, "", "sellers").facts)
+
+
+def test_group_numbers_are_dimensions_not_measures():
+    df = pd.DataFrame({"order_volume_quintile": [1, 2, 3], "avg_review_score": [4.12, 4.13, 4.09],
+                       "total_reviews": [2130, 3521, 6199]})
+    p = profile_result(df, "SELECT ... ORDER BY order_volume_quintile", "avg_review_score by order volume quintile")
+    assert p.role("order_volume_quintile") == "key" and p.primary_measure == "avg_review_score"
+    years = pd.DataFrame({"year": [2018, 2017], "total_revenue": [8451584.77, 3472898.25]})
+    assert profile_result(years, "", "total_revenue").role("year") == "key"
+
+
+def test_retention_rate_flags_cohorts_with_few_returning_customers():
+    df = pd.DataFrame({"cohort_month": pd.to_datetime(["2017-06-01", "2017-03-01", "2018-01-01"]),
+                       "cohort_size": [3037, 2503, 6842], "retained_customers": [13, 10, 20],
+                       "retention_rate_pct": [0.43, 0.40, 0.29]})
+    p = profile_result(df, "SELECT ... ORDER BY retention_rate_pct DESC, cohort_month ASC LIMIT 10",
+                       "retention_rate_pct from vw_retention")
+    assert p.volume_column == "retained_customers" and p.small_sample_rows == 3
