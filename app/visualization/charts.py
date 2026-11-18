@@ -9,8 +9,10 @@ Chooses a chart for a query result with fixed rules, using the analyzer's profil
   when the columns are periods and there are at most 6 groups)
 - two named measures across 15+ named rows       -> scatter (point size = volume)
 - one row per date, at least 3 rows              -> line (several lines when 2-4
-  measures share a unit)
+  measures share a unit); not when the query picked its top N by something other
+  than the date, which is a ranking of periods, not a series
 - a label column and 2 to 25 rows                -> horizontal bar, in the query's order
+  (the rows may also be named by a date or a group number such as a year or quintile)
 - anything else (one row, no measure, too many
   rows to read)                                  -> no chart; the table is the answer
 
@@ -23,13 +25,16 @@ under 30. No styling is left to the model.
 from __future__ import annotations
 
 import math
+import numbers
 from dataclasses import dataclass
 from typing import Literal
 
 import pandas as pd
 import plotly.graph_objects as go
 
-from app.analytics.analyzer import HASH_ID, SAMPLE_BASE_COLUMNS, SMALL_SAMPLE, ResultProfile, ordered_values
+from app.analytics.analyzer import (
+    AVERAGE_NAME, HASH_ID, SAMPLE_BASE_COLUMNS, SMALL_SAMPLE, ResultProfile, ordered_values,
+)
 from app.visualization.formatting import column_title, compact, display_value, format_value, pretty, unit
 
 __all__ = ["ChartSpec", "build_chart", "pretty"]
@@ -80,9 +85,14 @@ def build_chart(df: pd.DataFrame | None, profile: ResultProfile | None, title: s
     if _is_time_series(df, profile) and len(df) >= MIN_LINE_POINTS:
         return _line(df, profile, title)
 
-    label = profile.label_column
+    label = profile.label_column or _fallback_label(df, profile)
+    if label and profile.role(label) == "key" and len(_same_unit_measures(df, profile)) > 1 \
+            and MIN_LINE_POINTS <= len(df) <= MAX_BAR_ROWS:
+        # Month 1-8 with revenue_2017 and revenue_2018: one line per measure, so the
+        # comparison the query was built for is what the chart shows.
+        return _lines_over_key(df, profile, title, label)
     if label and len(df) <= MAX_BAR_ROWS:
-        return _bar(df, profile, title)
+        return _bar(df, profile, title, label)
     if label:
         return ChartSpec(None, reason=f"{len(df)} rows are too many for a readable bar chart; see the table.")
     return ChartSpec(None, reason="No column that names the rows or dates to chart against.")
@@ -90,16 +100,18 @@ def build_chart(df: pd.DataFrame | None, profile: ResultProfile | None, title: s
 
 # --------------------------------------------------------------------------- chart types
 
-def _bar(df: pd.DataFrame, profile: ResultProfile, title: str) -> ChartSpec:
-    m, label = profile.primary_measure, profile.label_column
-    names = _unique_labels(df[label])
+def _bar(df: pd.DataFrame, profile: ResultProfile, title: str, label: str | None = None) -> ChartSpec:
+    m, label = profile.primary_measure, label or profile.label_column
+    named_by_label = label == profile.label_column
+    names = _unique_labels(df[label]) if named_by_label else _unique_labels(df[label].map(_period_label))
     values = df[m]
     volume = _volume(df, profile, exclude={m})
     fig = go.Figure(go.Bar(
         x=values, y=names, orientation="h", marker=dict(color=ACCENT, line=dict(width=0)),
         text=[compact(m, v, profile) for v in values], textposition="outside", cliponaxis=False,
         textfont=dict(color=TEXT, size=12),
-        customdata=[_tooltip(df, i, profile, m, volume) for i in df.index],
+        customdata=[_tooltip(df, i, profile, m, volume, name=None if named_by_label else names[k])
+                    for k, i in enumerate(df.index)],
         hovertemplate=HOVER,
     ))
     low, high = min(0.0, float(values.min())), max(0.0, float(values.max()))
@@ -133,6 +145,28 @@ def _line(df: pd.DataFrame, profile: ResultProfile, title: str) -> ChartSpec:
     fig.update_layout(height=380, showlegend=len(measures) > 1, title_text=title or None, legend=_legend())
     kind = "multiline" if len(measures) > 1 else "line"
     return ChartSpec(kind, x=x, y=m, reason="A measure over time.", figure=fig)
+
+
+def _lines_over_key(df: pd.DataFrame, profile: ResultProfile, title: str, key: str) -> ChartSpec:
+    """One line per measure across a group number (month 1-12, period 0-23)."""
+    data = df.sort_values(key)
+    measures = _same_unit_measures(data, profile)
+    xs = [_period_label(v) for v in data[key]]
+    fig = go.Figure()
+    for k, column in enumerate(measures):
+        colour, dash = SERIES[k % len(SERIES)]
+        fig.add_trace(go.Scatter(
+            x=xs, y=data[column], name=pretty(column), mode="lines+markers+text",
+            line=dict(color=colour, width=2.5, dash=dash), marker=dict(size=6, color=colour),
+            text=_point_labels(data[column], column, profile, latest_only=True), textposition="top left",
+            textfont=dict(color=TEXT, size=11),
+            customdata=[_tooltip(data, i, profile, column, None, name=xs[j]) for j, i in enumerate(data.index)],
+            hovertemplate=HOVER,
+        ))
+    fig.update_xaxes(title_text=column_title(key, profile), type="category")
+    fig.update_yaxes(title_text=_unit_title(profile.primary_measure, profile))
+    fig.update_layout(height=380, title_text=title or None, legend=_legend())
+    return ChartSpec("multiline", x=key, y=profile.primary_measure, reason="Measures compared across periods.", figure=fig)
 
 
 def _grouped_lines(df: pd.DataFrame, profile: ResultProfile, title: str) -> ChartSpec:
@@ -234,11 +268,27 @@ def _heatmap(df: pd.DataFrame, profile: ResultProfile, title: str) -> ChartSpec:
 
 def _is_time_series(df: pd.DataFrame, profile: ResultProfile) -> bool:
     """The rows are periods (one per date), not entities that happen to carry a date.
-    'Revenue by month' is a series; 'top customers with their last order date' is not."""
+    'Revenue by month' is a series; 'top customers with their last order date' is not;
+    neither is 'the 10 cohorts that kept the most customers', a top N picked by a measure:
+    a line through it would join months that are not next to each other."""
     date = profile.date_column
     if not date or df[date].isna().any() or not df[date].is_unique:
         return False
+    if not profile.complete and profile.order_by not in (None, date):
+        return False
     return profile.label_column is None or profile.order_by == date
+
+
+def _fallback_label(df: pd.DataFrame, profile: ResultProfile) -> str | None:
+    """Something to name the bars by when no text column does: a date column (a ranking
+    of periods) or a group number the query made (a year, a quintile)."""
+    date = profile.date_column
+    if date and df[date].notna().all() and df[date].is_unique:
+        return date
+    keys = [c.name for c in profile.columns if c.role == "key" and c.name not in profile.sort_keys.values()]
+    if len(keys) == 1 and df[keys[0]].notna().all() and df[keys[0]].is_unique:
+        return keys[0]
+    return None
 
 
 def _time_like(column: str, profile: ResultProfile) -> bool:
@@ -247,12 +297,14 @@ def _time_like(column: str, profile: ResultProfile) -> bool:
 
 def _same_unit_measures(df: pd.DataFrame, profile: ResultProfile) -> list[str]:
     """The main measure plus up to three more of the same kind (all money, all %), for
-    several lines on one axis. Counts and volumes stay in the tooltip."""
+    several lines on one axis. Counts and volumes stay in the tooltip. Totals and
+    averages are not mixed: monthly revenue (about 1 million) and average order value
+    (about 150) share a unit but not a scale."""
     m = profile.primary_measure
-    kind = (unit(m, profile), profile.role(m))
+    kind = (unit(m, profile), profile.role(m), bool(AVERAGE_NAME.search(m)))
     others = [c.name for c in profile.columns
               if c.name != m and c.role in {"measure", "percent"} and c.name.lower() not in SAMPLE_BASE_COLUMNS
-              and (unit(c.name, profile), c.role) == kind
+              and (unit(c.name, profile), c.role, bool(AVERAGE_NAME.search(c.name))) == kind
               and "growth" not in c.name.lower()]
     return [m] + others[:3]
 
@@ -318,6 +370,8 @@ def _period_label(value) -> str:
         return f"{value:%b %Y}" if value.day == 1 else f"{value:%Y-%m-%d}"
     if isinstance(value, str) and value in MONTHS:
         return value[:3]
+    if isinstance(value, numbers.Real) and not isinstance(value, bool) and float(value).is_integer():
+        return str(int(value))  # a year or group number: 2018, not 2,018
     return display_value(value)
 
 

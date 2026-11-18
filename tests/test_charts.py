@@ -172,3 +172,52 @@ def test_monthly_line_labels_highest_lowest_and_latest_when_long():
     shown = [t for t in line.text if t]
     assert len(shown) == 3 and "BRL 500k" in shown and line.text[-1]
 
+
+# ------------------------------------------------- findings from the evaluation question set
+def test_top_periods_ranked_by_a_measure_are_bars_not_a_line():
+    """'Which cohorts kept the most customers?' picks 10 months by count: a line would join
+    months that are not next to each other."""
+    df = pd.DataFrame({"cohort_month": pd.to_datetime(["2018-01-01", "2018-03-01", "2017-06-01", "2017-08-01"]),
+                       "retained_customers": [20, 20, 13, 11]})
+    chart = chart_for(df, "SELECT ... ORDER BY retained_customers DESC, cohort_month ASC LIMIT 4", "retained_customers")
+    assert chart.kind == "bar" and chart.y == "cohort_month"
+    assert list(chart.figure.data[0].y) == ["Jan 2018", "Mar 2018", "Jun 2017", "Aug 2017"]  # query order
+
+
+def test_a_complete_series_sorted_by_its_measure_is_still_a_line():
+    df = pd.DataFrame({"order_month": pd.to_datetime(["2018-04-01", "2018-01-01", "2018-02-01"]),
+                       "total_revenue": [1132878.93, 1077887.46, 966168.41]})
+    chart = chart_for(df, "SELECT ... ORDER BY total_revenue DESC\nLIMIT 500", "total_revenue")
+    assert chart.kind == "line"
+
+
+def test_rows_named_by_a_group_number_get_a_bar():
+    quintiles = pd.DataFrame({"order_volume_quintile": [1, 2, 3, 4, 5],
+                              "avg_review_score": [4.12, 4.13, 4.09, 4.15, 4.09],
+                              "total_reviews": [2130, 3521, 6199, 13881, 70942]})
+    chart = chart_for(quintiles, "SELECT ... ORDER BY order_volume_quintile\nLIMIT 500", "avg_review_score")
+    assert chart.kind == "bar" and chart.y == "order_volume_quintile"
+    assert list(chart.figure.data[0].y) == ["1", "2", "3", "4", "5"]
+    years = pd.DataFrame({"year": [2018, 2017], "total_revenue": [8451584.77, 3472898.25]})
+    chart = chart_for(years, "SELECT ... ORDER BY year DESC\nLIMIT 500", "total_revenue")
+    assert chart.kind == "bar" and list(chart.figure.data[0].y) == ["2018", "2017"]
+
+
+def test_two_years_side_by_side_by_month_number_are_two_lines():
+    """Jan-Aug 2018 vs Jan-Aug 2017 by month number: both years on the chart, not only 2017."""
+    df = pd.DataFrame({"month_number": [1, 2, 3, 4], "revenue_2017_brl": [127482.37, 271239.32, 414330.95, 390812.40],
+                       "orders_2017": [750, 1653, 2546, 2303],
+                       "revenue_2018_brl": [1077887.46, 966168.41, 1120598.24, 1132878.93],
+                       "orders_2018": [7069, 6555, 7003, 6798]})
+    chart = chart_for(df, "SELECT ... ORDER BY month_number\nLIMIT 500", "total_revenue from vw_new_vs_returning_revenue")
+    assert chart.kind == "multiline" and chart.x == "month_number"
+    assert len(chart.figure.data) == 2 and list(chart.figure.data[0].x) == ["1", "2", "3", "4"]
+
+
+def test_monthly_totals_and_averages_are_not_drawn_on_one_axis():
+    df = pd.DataFrame({"order_month": pd.to_datetime(["2018-01-01", "2018-02-01", "2018-03-01"]),
+                       "total_revenue": [1077887.46, 966168.41, 1120598.24],
+                       "new_revenue": [1056000.0, 949944.05, 1100000.0],
+                       "new_avg_order_value": [152.0, 147.62, 160.0]})
+    chart = chart_for(df, "SELECT ... ORDER BY order_month\nLIMIT 500", "total_revenue")
+    assert chart.kind == "multiline" and {t.name for t in chart.figure.data} == {pretty("total_revenue"), pretty("new_revenue")}
