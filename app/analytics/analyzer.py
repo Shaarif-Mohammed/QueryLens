@@ -229,7 +229,7 @@ def _primary_measure(numeric, roles, hint, order_by, ranked: bool = True) -> str
     if not numeric:
         return None
     hint = hint or ""
-    named_cols = _named_columns(numeric, hint)
+    named_cols = _named_columns(numeric, hint, all_columns=roles)
     ranking_basis_only = order_by in named_cols and named_cols[0] != order_by and bool(
         re.search(rf"\bby\s+(?:the\s+)?(?:highest\s+|lowest\s+)?{re.escape(order_by)}(?![A-Za-z0-9_])", hint, re.IGNORECASE)
     )
@@ -288,19 +288,49 @@ def _pair(df, roles, numeric, hint, label, date) -> tuple[str, str] | None:
     if label is None or date is not None or not (MIN_PAIR_ROWS <= len(df) <= 500):
         return None
     candidates = [n for n in numeric if roles[n] != "count" and n.lower() not in SAMPLE_BASE_COLUMNS]
-    named = _named_columns(candidates, hint or "")
+    named = _named_columns(candidates, hint or "", all_columns=roles)
     if len(named) != 2:
         return None
     return named[0], named[1]
 
 
-def _named_columns(candidates: list[str], hint: str) -> list[str]:
-    """Candidate columns named in the SQL step's measure text, in the order it names them."""
-    found = {}
+# Words that say how a figure is totalled or in which currency, not what it measures:
+# total_revenue and revenue_brl are the same measure.
+GENERIC_NAME_WORDS = {"total", "sum", "avg", "average", "mean", "brl", "value", "amount", "overall"}
+# Relation names in the measure text are not columns.
+RELATION_PREFIX = re.compile(r"^(vw|ml|fact|dim)_", re.IGNORECASE)
+SNAKE_NAME = re.compile(r"(?<![A-Za-z0-9_.])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![A-Za-z0-9_])")
+
+
+def _core_words(name: str) -> frozenset[str]:
+    """The words that say what a column measures: total_revenue and revenue_brl -> {revenue}."""
+    words = (w[:-1] if len(w) > 3 and w.endswith("s") else w for w in name.lower().split("_"))
+    return frozenset(w for w in words if w and w not in GENERIC_NAME_WORDS)
+
+
+def _named_columns(candidates: list[str], hint: str, all_columns=()) -> list[str]:
+    """Candidate columns the SQL step's measure text names, in the order it names them.
+
+    A column named exactly counts first. The SQL step sometimes names the measure as the
+    view calls it (total_revenue) while the query returns it under its own alias
+    (revenue_brl); a snake_case name in the text that is not a result column then stands
+    for the one candidate column with the same core words, if there is exactly one."""
+    found: dict[str, int] = {}
     for n in candidates:
         if m := re.search(rf"(?<![A-Za-z0-9_]){re.escape(n)}(?![A-Za-z0-9_])", hint):
             found[n] = m.start()
-    return sorted(found, key=found.get)
+    known = {c.lower() for c in all_columns} | {c.lower() for c in candidates}
+    for m in SNAKE_NAME.finditer(hint):
+        word = m.group(1)
+        if word.lower() in known or RELATION_PREFIX.match(word):
+            continue
+        core = _core_words(word)
+        if not core:
+            continue
+        matches = [n for n in candidates if n not in found and _core_words(n) == core]
+        if len(matches) == 1:
+            found[matches[0]] = m.start()
+    return [n for n, _ in sorted(found.items(), key=lambda item: item[1])]
 
 
 def ordered_values(df: pd.DataFrame, column: str, profile: ResultProfile) -> list:
@@ -443,6 +473,8 @@ def _grid_facts(df: pd.DataFrame, p: ResultProfile) -> list[str]:
         f"lowest {_plain(by_column.idxmin())} ({format_number(by_column.min())}).",
         f"Total {m} by {row}: highest {short_label(by_row.idxmax())} ({format_number(by_row.max())}), "
         f"lowest {short_label(by_row.idxmin())} ({format_number(by_row.min())}).",
+        f"These totals add up only the {df[row].nunique()} {row} values in the result; "
+        "do not describe them as marketplace-wide.",
     ]
 
 

@@ -289,3 +289,52 @@ def test_retention_rate_flags_cohorts_with_few_returning_customers():
     p = profile_result(df, "SELECT ... ORDER BY retention_rate_pct DESC, cohort_month ASC LIMIT 10",
                        "retention_rate_pct from vw_retention")
     assert p.volume_column == "retained_customers" and p.small_sample_rows == 3
+
+# The SQL step may name a measure as the view calls it (total_revenue) while the query
+# returns it under its own alias (revenue_brl).
+
+
+CATEGORY_MONTHS_SQL = (
+    "SELECT d.month, d.month_name, category, ROUND(SUM(f.price + f.freight_value), 2) AS revenue_brl, "
+    "COUNT(DISTINCT o.order_id) AS order_count FROM warehouse.fact_order_items f "
+    "GROUP BY d.month, d.month_name, category ORDER BY d.month ASC, revenue_brl DESC\nLIMIT 500"
+)
+CATEGORY_MONTHS_HINT = "total_revenue (price + freight, delivered orders, BRL) and order_count from raw tables"
+
+
+def category_months():
+    rows = []
+    for month, name in [(1, "January"), (2, "February"), (3, "March")]:
+        for i, category in enumerate(["bed_bath_table", "health_beauty", "toys"]):
+            rows.append([month, name, category, 1000.0 * month + 100 * i, 10 * month + i])
+    return pd.DataFrame(rows, columns=["month", "month_name", "category", "revenue_brl", "order_count"])
+
+
+def test_measure_named_as_the_view_calls_it_finds_its_alias():
+    p = profile_result(category_months(), CATEGORY_MONTHS_SQL, CATEGORY_MONTHS_HINT)
+    assert p.primary_measure == "revenue_brl"
+    assert p.grid == ("category", "month_name")
+
+
+def test_grid_totals_are_marked_as_covering_only_the_rows_shown():
+    p = profile_result(category_months(), CATEGORY_MONTHS_SQL, CATEGORY_MONTHS_HINT)
+    assert any("only the 3 category values" in f and "marketplace-wide" in f for f in p.facts)
+
+
+def test_alias_is_not_guessed_when_two_columns_could_be_meant():
+    df = category_months().assign(net_revenue_brl=lambda d: d["revenue_brl"] * 0.9)
+    df = df.rename(columns={"net_revenue_brl": "revenue_avg"})  # same core word: revenue
+    p = profile_result(df, CATEGORY_MONTHS_SQL, CATEGORY_MONTHS_HINT)
+    assert p.primary_measure == "order_count"  # unchanged: the only exactly named column
+
+
+def test_alias_counts_toward_a_pair_of_measures():
+    df = pd.DataFrame({
+        "seller_id": [f"{i:032x}" for i in range(20)],
+        "revenue_brl": [1000.0 + 50 * i for i in range(20)],
+        "on_time_rate": [90.0 + (i % 7) for i in range(20)],
+        "delivered_orders": [60 + i for i in range(20)],
+    })
+    sql = "SELECT seller_id, revenue_brl, on_time_rate, delivered_orders FROM warehouse.vw_seller_performance ORDER BY revenue_brl DESC LIMIT 500"
+    p = profile_result(df, sql, "total_revenue and on_time_rate from vw_seller_performance")
+    assert p.pair == ("revenue_brl", "on_time_rate")
