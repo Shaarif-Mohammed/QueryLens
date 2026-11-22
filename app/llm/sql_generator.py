@@ -162,10 +162,15 @@ class SqlGenerator:
 
 MAX_FOLLOW_UPS = 2
 MAX_FOLLOW_UP_CHARS = 120
+# Wording that implies a statistical test the data has not had. The explanation step
+# flags the same terms; a suggestion is a question shown as written, so it is dropped
+# rather than reworded.
+BANNED_FOLLOW_UP_TERMS = re.compile(r"\b(?:significant(?:ly)?|statistical(?:ly)?)\b", re.IGNORECASE)
 
 
 def clean_follow_ups(questions: list[str] | None, asked: str) -> list[str]:
-    """At most two distinct, short questions, none repeating the one just asked."""
+    """At most two distinct, short questions, none repeating the one just asked and
+    none using wording that overstates the evidence ("significantly", "statistically")."""
     def key(text: str) -> str:
         return re.sub(r"\s+", " ", text.strip().lower()).rstrip(" ?.!")
 
@@ -174,6 +179,8 @@ def clean_follow_ups(questions: list[str] | None, asked: str) -> list[str]:
     for q in questions or []:
         q = re.sub(r"\s+", " ", str(q)).strip()
         if not q or len(q) > MAX_FOLLOW_UP_CHARS or key(q) in seen:
+            continue
+        if BANNED_FOLLOW_UP_TERMS.search(q):
             continue
         seen.add(key(q))
         kept.append(q if q.endswith("?") else q.rstrip(".!") + "?")

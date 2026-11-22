@@ -231,3 +231,39 @@ def test_follow_ups_are_capped_deduplicated_and_never_repeat_the_question():
 def test_overlong_or_blank_follow_ups_are_dropped():
     assert clean_follow_ups(["", "   ", "x" * 200], "Q?") == []
     assert clean_follow_ups(None, "Q?") == []
+
+
+def test_follow_ups_with_overstated_wording_are_dropped():
+    kept = clean_follow_ups(
+        [
+            "Do sellers with more orders differ significantly in review scores?",
+            "Is there a statistically meaningful link between freight and reviews?",
+            "Which states have the slowest delivery?",
+        ],
+        "Who are the best sellers?",
+    )
+    assert kept == ["Which states have the slowest delivery?"]
+
+
+def test_banned_terms_are_matched_as_whole_words_in_any_case():
+    kept = clean_follow_ups(
+        [
+            "Is the gap SIGNIFICANT across states?",
+            "Which categories have an insignificant share of late orders?",
+        ],
+        "How is delivery by state?",
+    )
+    # "insignificant" is a different word; only the exact terms are banned.
+    assert kept == ["Which categories have an insignificant share of late orders?"]
+
+
+def test_a_dropped_follow_up_makes_room_for_the_next_clean_one():
+    kept = clean_follow_ups(
+        [
+            "Does revenue differ significantly by state?",
+            "Which months had the most orders?",
+            "How does average order value change by month?",
+        ],
+        "What was monthly revenue in 2018?",
+    )
+    assert kept == ["Which months had the most orders?", "How does average order value change by month?"]
