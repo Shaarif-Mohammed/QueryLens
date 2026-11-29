@@ -3,6 +3,8 @@
 
 QueryLens was evaluated on a fixed set of 31 business questions, graded by hand against figures checked directly in the warehouse. The set was run once as built, the problems it exposed were fixed, and the affected questions were run again. This document records the question set, the grades before and after the fixes, what was changed, and what remains a known limitation.
 
+How the system is tested during development (unit tests, live checks, and the findings behind them) is described in [04_testing.md](04_testing.md). This document is about answer quality on realistic questions.
+
 ---
 
 ## Summary
@@ -124,6 +126,8 @@ Answers usually take 8–20 seconds. The slowest are those where the main model 
 - **Explanations describe; they do not explain causes.** A "why" question gets what changed alongside the result, not a reason.
 - **The busy-model problem is reduced, not removed.** When both the main and backup models are unavailable, QueryLens says so and points to the quick insights.
 - **Grading is by hand** on 31 questions. It shows how the system behaves on realistic and adversarial questions; it is not a statistical accuracy rate.
+
+Further limitations of the product as a whole are listed in [06_limitations_and_future_work.md](06_limitations_and_future_work.md).
 
 ---
 

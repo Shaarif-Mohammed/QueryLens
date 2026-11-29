@@ -3,7 +3,7 @@
 
 QueryLens puts a language model between a business question and a production warehouse, so it has to be trustworthy in two ways: the code around the model must handle every case correctly, including failures that cannot be produced on demand, and the model itself must keep behaving the way the code expects. QueryLens is tested from both sides. **Offline tests** replace the model and the database with scripted fakes and check the code's logic exactly, for free, in seconds. **Live tests** run against the real model and the real database and check that they still behave as assumed.
 
-Tests alone cannot tell whether an answer is *good*. Most of what made QueryLens trustworthy came from running real questions end to end, checking every answer by hand against the data, and turning each problem found into a rule, a code check and a test. This document records that loop: **what we found → what we changed → what guards it now.** The graded question set used to judge final answer quality is in [05_evaluation_results.md](05_evaluation_results.md).
+Tests alone cannot tell whether an answer is *good*. Most of what made QueryLens trustworthy came from running real questions end to end, checking every answer by hand against the data, and turning each problem found into a rule, a code check and a test. This document records that loop: **what we found → what we changed → what guards it now.** The graded question set used to judge final answer quality is in [05_evaluation_results.md](05_evaluation_results.md); the limits that remain are in [06_limitations_and_future_work.md](06_limitations_and_future_work.md).
 
 **300 tests** (281 offline across 12 files, 19 live across 3 files) · **about 15 rounds** of live testing with every answer checked by hand · **57 findings** that changed how QueryLens behaves, each guarded by a test, a code check or a written rule.
 
@@ -90,7 +90,7 @@ The explanation step was built over four rounds; each re-ran the same answers an
 | A claim about all 500 rows from the 50 the model was shown. | When fewer rows are shown than the result has, only the rows shown are described. | Written rule; checked in evaluation. |
 | 0.43% and 0.40% both written as "0.4%". | Percentages under 1% keep two decimals. | Written rule; checked in evaluation. |
 
-When a flagged figure survives the single rewrite, the answer is still shown, with a short note to rely on the table.
+When a flagged figure survives the single rewrite, the answer is still shown, with a short note to rely on the table. See [06_limitations_and_future_work.md](06_limitations_and_future_work.md).
 
 </details>
 

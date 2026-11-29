@@ -3,7 +3,7 @@
 
 QueryLens turns a plain-English business question into a validated SQL query, runs it against a PostgreSQL warehouse, and explains the result in plain English. One rule shapes the whole design: **the language model never answers from memory.** Every answer comes from a real query on real data, and every figure in an explanation is checked against the result in code. The architecture exists to make that rule hold every time.
 
-This document describes the path a question takes, what each part does, how answers are checked, where QueryLens runs, and the design decisions behind it. The data description the model relies on is covered in [02_metadata.md](02_metadata.md).
+This document describes the path a question takes, what each part does, how answers are checked, where QueryLens runs, and the design decisions behind it. The data description the model relies on is covered in [02_metadata.md](02_metadata.md), the testing behind each safeguard in [04_testing.md](04_testing.md), and the remaining limits in [06_limitations_and_future_work.md](06_limitations_and_future_work.md).
 
 ---
 
@@ -137,6 +137,8 @@ Trust comes from several independent layers, so no single one has to be perfect:
 5. **Facts in code:** what is highest, lowest, complete or a small sample is computed from the rows, not judged by the model.
 6. **Numbers and wording check:** every figure in an explanation must trace to the result, with one automatic rewrite.
 7. **Everything visible:** the SQL, the measure used, the assumptions and the full table are always available beside the explanation.
+
+What each layer was built in response to, and the tests that guard it, are in [04_testing.md](04_testing.md).
 
 ---
 

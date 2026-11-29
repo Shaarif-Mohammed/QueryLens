@@ -8,7 +8,8 @@ correct is not the model alone: it is the **metadata layer**, three YAML files i
 definitions an analyst would apply. Every SQL-generation request includes them.
 
 This document explains what the files contain, how they were checked, how they reach
-the model, and how to change them safely.
+the model, and how to change them safely. How the rest of QueryLens uses them is in
+[03_architecture.md](03_architecture.md).
 
 ---
 
@@ -47,6 +48,7 @@ wrong.
   `performance_score` among scored sellers.
 - Top categories: highest `total_revenue`; most popular: most orders.
 - "High" revenue or volume with no number given: the top quarter.
+- "Above" or "below" average: compared with the overall average weighted by volume.
 
 **Minimum volume for rankings.** When sellers are ranked by an average or a rate, at
 least 5 observations are required in that measure's own base: delivered orders for
@@ -87,9 +89,9 @@ discriminator value in the wrong case, silently returns zero rows.
 
 **Known data quirks are documented rather than hidden.** Examples:
 - About 97% of customers placed a single order, so most tie on frequency in the RFM
-  scoring and the ties are split arbitrarily. Segment sizes can shift slightly between
-  runs, so segment answers are best read as shares, and `vw_clv.rfm_segment` is not
-  compared with `vw_rfm.segment`.
+  scoring. Ties are broken by customer ID, which keeps segment sizes stable from run to
+  run, but a one-order customer can still carry a label such as "Loyal". Segment answers
+  carry a caveat that labels do not necessarily mean repeat purchases.
 - `vw_seller_performance` stores missing values as 0, so rankings on review score or
   delivery require the matching volume column to be above zero.
 - The `ml_*` tables are point-in-time model outputs, not live calculations.
@@ -126,9 +128,12 @@ prompt cache.
 3. **Keep audit material in audit keys.** Figures quoted from documents go under
    `evaluation_reference`; review notes go under `owner_review`. Never put an expected
    answer in a field the model can see.
-4. **Run the tests:** `python -m pytest tests/ -v`.
+4. **Run the tests:** `python -m pytest tests/ -v`, then the live model tests
+   (`QUERYLENS_LIVE_LLM_TESTS=1`), which check that answers still follow the rules.
 5. **Re-run sample questions** that touch the changed definition, and run the generated
    SQL to confirm the results still make sense.
+6. **Rebuild the prepared answers** (`python scripts/build_cached_answers.py`) and check
+   the rebuilt ones by hand, since they were produced with the old definitions.
 
 When a business definition changes (for example, what counts as churn), record the
 decision and its reason in the metric's `definition` or `notes`, so the reasoning

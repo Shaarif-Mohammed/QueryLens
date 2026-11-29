@@ -1,6 +1,8 @@
 # QueryLens — AI-Powered Marketplace Analytics Copilot
 ## Product Requirements Document (PRD)
 
+**Related:** [Architecture](03_architecture.md) for technical design · [Evaluation results](05_evaluation_results.md) for answer quality
+
 ---
 
 ## 1. Why this matters
@@ -86,7 +88,7 @@ Grouped by the kind of value each cluster of use cases demonstrates.
 - **Governed by design**: the product prefers the existing validated views over raw tables, and never gains write access
 - **Availability**: the product stays usable when the language model is busy or a usage limit is reached; prepared answers to common questions always load
 
-The detailed technical evaluation, covering SQL accuracy, groundedness and view-first compliance on a set of 20 to 30 test questions, is documented separately.
+The detailed technical evaluation, covering SQL accuracy, groundedness and view-first compliance across 31 questions, is documented separately in [05_evaluation_results.md](05_evaluation_results.md).
 
 ---
 
