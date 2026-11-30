@@ -9,6 +9,7 @@ scripted answers or errors, so the retry, backup-model and parsing logic can be 
 exactly.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -267,3 +268,111 @@ def test_a_dropped_follow_up_makes_room_for_the_next_clean_one():
         "What was monthly revenue in 2018?",
     )
     assert kept == ["Which months had the most orders?", "How does average order value change by month?"]
+
+
+# ------------------------------------------- Vertex AI credentials from hosting secrets
+# Hosted deployments have no key file: the key's JSON arrives as an environment
+# variable. These tests replace genai.Client with a recorder, so nothing is sent.
+
+FAKE_KEY = {
+    "type": "service_account",
+    "project_id": "demo-project",
+    "private_key_id": "0",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+    "client_email": "querylens-app@demo-project.iam.gserviceaccount.com",
+    "client_id": "1",
+    "token_uri": "https://oauth2.googleapis.com/token",
+}
+
+
+@pytest.fixture
+def client_settings(monkeypatch):
+    """Vertex AI selected; returns the keyword arguments genai.Client was created with."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-project")
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_JSON", raising=False)
+    seen = {}
+    monkeypatch.setattr(sg.genai, "Client", lambda **kwargs: seen.update(kwargs) or "client")
+    return seen
+
+
+@pytest.fixture
+def built_from(monkeypatch):
+    """Records what the service-account credentials were built from."""
+    from google.oauth2 import service_account
+
+    calls = []
+
+    def fake_from_info(info, scopes=None):
+        calls.append((info, scopes))
+        return "credentials"
+
+    monkeypatch.setattr(service_account.Credentials, "from_service_account_info", fake_from_info)
+    return calls
+
+
+def test_key_json_in_the_environment_builds_the_credentials(client_settings, built_from, monkeypatch):
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(FAKE_KEY))
+    assert sg._make_client() == "client"
+    assert built_from == [(FAKE_KEY, sg.VERTEX_SCOPES)]
+    assert client_settings["credentials"] == "credentials"
+    assert client_settings["vertexai"] is True and client_settings["project"] == "demo-project"
+    assert client_settings["location"] == "global"
+
+
+def test_without_key_json_the_client_is_created_as_before(client_settings, built_from):
+    sg._make_client()
+    assert "credentials" not in client_settings  # the SDK finds the key file itself
+    assert built_from == []
+    assert client_settings["vertexai"] is True and client_settings["project"] == "demo-project"
+
+
+def test_blank_key_json_counts_as_unset(client_settings, built_from, monkeypatch):
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", "   \n")
+    sg._make_client()
+    assert "credentials" not in client_settings and built_from == []
+
+
+def test_line_breaks_inside_the_key_are_accepted(client_settings, built_from, monkeypatch):
+    """A TOML \"\"\" string turns the key file's \\n escapes into real line breaks,
+    which strict JSON rejects."""
+    with_real_breaks = json.dumps(FAKE_KEY, indent=2).replace("\\n", "\n")
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", with_real_breaks)
+    sg._make_client()
+    assert built_from[0][0]["private_key"] == FAKE_KEY["private_key"]
+
+
+def test_malformed_key_json_gives_a_clear_error_without_the_contents(client_settings, monkeypatch):
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", '{"type": "service_account", "private_key": "SECRET-PART"')
+    with pytest.raises(RuntimeError, match="GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON") as err:
+        sg._make_client()
+    assert "SECRET-PART" not in str(err.value)
+    assert err.value.__cause__ is None and err.value.__suppress_context__  # no chained parser error
+
+
+@pytest.mark.parametrize("value", ['{"type": "authorized_user"}', '["service_account"]'])
+def test_json_that_is_not_a_service_account_key_is_refused(client_settings, monkeypatch, value):
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", value)
+    with pytest.raises(RuntimeError, match="not a service-account key"):
+        sg._make_client()
+
+
+def test_key_with_missing_fields_or_a_bad_private_key_gives_a_clear_error(client_settings, monkeypatch):
+    """Real google-auth parsing, no recorder: fields missing, then an unreadable key."""
+    missing = {k: v for k, v in FAKE_KEY.items() if k != "client_email"}
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(missing))
+    with pytest.raises(RuntimeError, match="could not be used: missing client_email"):
+        sg._make_client()
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(FAKE_KEY))
+    with pytest.raises(RuntimeError, match="could not be used: the private key could not be read") as err:
+        sg._make_client()
+    assert "not-a-real-key" not in str(err.value)
+
+
+def test_key_json_is_ignored_on_the_gemini_developer_api(client_settings, built_from, monkeypatch):
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(FAKE_KEY))
+    sg._make_client()
+    assert client_settings["api_key"] == "test-key" and "credentials" not in client_settings
+    assert built_from == []
