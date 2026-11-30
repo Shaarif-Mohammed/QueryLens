@@ -11,6 +11,7 @@ pass the SQL validator before it reaches the database.
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
@@ -280,10 +281,15 @@ def using_vertex_ai() -> bool:
     return os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in {"1", "true", "yes"}
 
 
+VERTEX_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+
+
 def _make_client(api_key: str | None = None) -> genai.Client:
     """Gemini client for one of two backends, chosen in .env:
     - Vertex AI (GOOGLE_GENAI_USE_VERTEXAI=true): billed to the Google Cloud project,
-      authenticated with a service account (GOOGLE_APPLICATION_CREDENTIALS).
+      authenticated with a service account: the key's JSON in GOOGLE_SERVICE_ACCOUNT_JSON
+      (hosted deployments, where there is no key file) or the key file named by
+      GOOGLE_APPLICATION_CREDENTIALS (local).
     - Gemini Developer API (default): authenticated with GEMINI_API_KEY.
     Both serve the same Gemini models through the same SDK, so nothing else changes."""
     http_options = types.HttpOptions(timeout=REQUEST_TIMEOUT_SECONDS * 1000)  # milliseconds
@@ -291,16 +297,50 @@ def _make_client(api_key: str | None = None) -> genai.Client:
         project = os.getenv("GOOGLE_CLOUD_PROJECT")
         if not project:
             raise RuntimeError("GOOGLE_CLOUD_PROJECT is not set (check .env).")
-        return genai.Client(
+        settings = dict(
             vertexai=True,
             project=project,
             location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
             http_options=http_options,
         )
+        credentials = service_account_credentials()
+        if credentials is not None:
+            settings["credentials"] = credentials
+        return genai.Client(**settings)
     api_key = api_key or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set (check .env).")
     return genai.Client(api_key=api_key, http_options=http_options)
+
+
+def service_account_credentials():
+    """Credentials from the key JSON in GOOGLE_SERVICE_ACCOUNT_JSON, or None when it is
+    unset (the SDK then finds the key file or other default credentials as before).
+    Hosting secrets often turn the key's "\\n" escapes into real line breaks, so line
+    breaks inside strings are accepted. Error messages never repeat the key's contents."""
+    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if not raw:
+        return None
+    try:
+        info = json.loads(raw, strict=False)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON ({exc.msg}, line {exc.lineno}). "
+            "Paste the whole service-account key file."
+        ) from None
+    if not isinstance(info, dict) or info.get("type") != "service_account":
+        raise RuntimeError(
+            'GOOGLE_SERVICE_ACCOUNT_JSON is not a service-account key (expected "type": "service_account").'
+        )
+    missing = [k for k in ("client_email", "private_key", "token_uri") if not info.get(k)]
+    if missing:
+        raise RuntimeError(f"GOOGLE_SERVICE_ACCOUNT_JSON could not be used: missing {', '.join(missing)}.")
+    from google.oauth2 import service_account
+
+    try:
+        return service_account.Credentials.from_service_account_info(info, scopes=VERTEX_SCOPES)
+    except ValueError:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON could not be used: the private key could not be read.") from None
 
 
 def _is_network_error(exc: Exception) -> bool:
