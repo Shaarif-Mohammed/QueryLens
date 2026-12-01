@@ -3,9 +3,11 @@ QueryLens — AI-Powered Marketplace Analytics Copilot
 Setup check
 
 Confirms the two things the app needs before it can answer a question:
-  1. The read-only database role can connect and see the warehouse.
+  1. The read-only database role can connect and see the warehouse, through the
+     app's own connection (DB_SSLMODE included).
   2. Gemini answers, through the same route the app uses (Vertex AI or the
-     Gemini Developer API, as set in .env), on the main model and each backup.
+     Gemini Developer API, as set in .env; a key file or GOOGLE_SERVICE_ACCOUNT_JSON),
+     on the main model and each backup.
 
 Run from the project root:  python scripts/check_setup.py
 Nothing is written to the database. Each Gemini check is one tiny request.
@@ -26,20 +28,13 @@ EXPECTED = {"view": 13, "dim/fact table": 9, "ml table": 4}
 
 
 def check_database() -> bool:
-    import psycopg2
+    from app.database.connection import get_connection
 
     schema = os.getenv("DB_SCHEMA", "warehouse")
-    print(f"\n--- Database ({os.getenv('DB_USER')} @ {os.getenv('DB_HOST')}/{os.getenv('DB_NAME')}) ---")
+    ssl = os.getenv("DB_SSLMODE") or "default"
+    print(f"\n--- Database ({os.getenv('DB_USER')} @ {os.getenv('DB_HOST')}/{os.getenv('DB_NAME')}, SSL {ssl}) ---")
     try:
-        conn = psycopg2.connect(
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT", "5432"),
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            connect_timeout=10,
-        )
-        conn.set_session(readonly=True)
+        conn = get_connection()  # the app's own read-only connection, DB_SSLMODE included
         with conn, conn.cursor() as cur:
             cur.execute("SELECT current_user")
             print("Connected as:", cur.fetchone()[0])
@@ -94,11 +89,15 @@ def check_gemini() -> bool:
     if vertex:
         print(f"\n--- Gemini via Vertex AI (project {os.getenv('GOOGLE_CLOUD_PROJECT')}, "
               f"location {os.getenv('GOOGLE_CLOUD_LOCATION', 'global')}) ---")
-        key = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
-        if not key or not Path(key).is_file():
-            print(f"Key file not found: {key or '(GOOGLE_APPLICATION_CREDENTIALS is empty)'}")
-            print("Gemini check: FAILED")
-            return False
+        if os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip():
+            print("Credentials: key JSON from GOOGLE_SERVICE_ACCOUNT_JSON")
+        else:
+            key = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+            if not key or not Path(key).is_file():
+                print(f"Key file not found: {key or '(GOOGLE_APPLICATION_CREDENTIALS is empty)'}")
+                print("Gemini check: FAILED")
+                return False
+            print(f"Credentials: key file {key}")
     else:
         print("\n--- Gemini via the Gemini Developer API (AI Studio key) ---")
 
