@@ -1,7 +1,7 @@
 # QueryLens — AI-Powered Marketplace Analytics Copilot
 ## Product Requirements Document (PRD)
 
-**Related:** [Architecture](03_architecture.md) for technical design · [Evaluation results](05_evaluation_results.md) for answer quality
+**Related:** [README](../README.md) for setup and usage · [Architecture](03_architecture.md) for technical design · [Evaluation results](05_evaluation_results.md) for answer quality
 
 ---
 
