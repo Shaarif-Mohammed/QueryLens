@@ -171,10 +171,10 @@ flowchart LR
 | Part | Service | Notes |
 |---|---|---|
 | Application | Streamlit Community Cloud | Deployed from the GitHub repository; public link |
-| Database | Neon (serverless PostgreSQL) | Warehouse schema only, restored from the local warehouse; encrypted connections; read-only role |
+| Database | Neon (serverless PostgreSQL) | Warehouse schema only, restored from the local warehouse; AWS US West (Oregon), close to Streamlit Community Cloud's servers; pooled, encrypted connections; read-only role |
 | Language model | Gemini through Google Cloud Vertex AI | Main model `gemini-3.5-flash`, backup `gemini-3.8-flash`, global location; service account with the Vertex AI User role |
 
-**Secrets** — the database credentials and the service-account key — are kept in Streamlit's secrets manager when hosted and in a local `.env` file during development, never in the repository. `.env.example` lists the settings a working setup needs, with placeholders; the rest (timeouts, the SQL thinking budget, SSL mode) have defaults in code.
+**Secrets** — the database credentials and the service-account key — are kept in Streamlit's secrets manager when hosted and in a local `.env` file during development, never in the repository. Hosted, there is no key file, so the key's JSON is held in the `GOOGLE_SERVICE_ACCOUNT_JSON` secret; locally, `GOOGLE_APPLICATION_CREDENTIALS` points to the key file kept outside the project. `.env.example` lists the settings a working setup needs, with placeholders; the rest (timeouts, the SQL thinking budget) have defaults in code.
 
 **Configurable settings** include the models and backup models, the request timeout, the thinking budgets for SQL and explanations, the database connection and statement time limit, and the per-session question cap. Changing the model needs no code change.
 
