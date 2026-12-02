@@ -5,7 +5,7 @@ QueryLens puts a language model between a business question and a production war
 
 Tests alone cannot tell whether an answer is *good*. Most of what made QueryLens trustworthy came from running real questions end to end, checking every answer by hand against the data, and turning each problem found into a rule, a code check and a test. This document records that loop: **what we found → what we changed → what guards it now.** The graded question set used to judge final answer quality is in [05_evaluation_results.md](05_evaluation_results.md); the limits that remain are in [06_limitations_and_future_work.md](06_limitations_and_future_work.md).
 
-**300 tests** (281 offline across 12 files, 19 live across 3 files) · **about 15 rounds** of live testing with every answer checked by hand · **57 findings** that changed how QueryLens behaves, each guarded by a test, a code check or a written rule.
+**309 tests** (290 offline across 12 files, 19 live across 3 files) · **about 15 rounds** of live testing with every answer checked by hand · **57 findings** that changed how QueryLens behaves, each guarded by a test, a code check or a written rule.
 
 ---
 
@@ -191,7 +191,7 @@ bash scripts/run_evaluation.sh
 | Part of the product | Offline tests | Live tests |
 |---|---|---|
 | Data description sent to the model | [test_prompt_builder.py](../tests/test_prompt_builder.py) (8) | — |
-| Writing SQL and model calls | [test_sql_generator.py](../tests/test_sql_generator.py) (25) | [test_live_sql_generator.py](../tests/test_live_sql_generator.py) (12) |
+| Writing SQL and model calls | [test_sql_generator.py](../tests/test_sql_generator.py) (34) | [test_live_sql_generator.py](../tests/test_live_sql_generator.py) (12) |
 | SQL validator | [test_sql_validator.py](../tests/test_sql_validator.py) (60) | — |
 | Running queries | [test_query_executor.py](../tests/test_query_executor.py) (16) | [test_live_database.py](../tests/test_live_database.py) (3) |
 | Question-to-answer pipeline | [test_pipeline.py](../tests/test_pipeline.py) (20) | — |
@@ -202,4 +202,4 @@ bash scripts/run_evaluation.sh
 | Quick insights | [test_answers.py](../tests/test_answers.py) (18) | — |
 | Session limits and page address | [test_session.py](../tests/test_session.py) (11) | — |
 | Page fragments | [test_ui.py](../tests/test_ui.py) (9) | — |
-| **Total** | **281** | **19** |
+| **Total** | **290** | **19** |
